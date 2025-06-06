@@ -33,18 +33,18 @@
 
 1.  **克隆仓库**
     ```bash
-    git clone <your-repository-url>
+    git clone https://github.com/MuQY1818/TimeSeriesForecastingProject.git
     cd TimeSeriesForecastingProject
     ```
 
 2.  **创建虚拟环境并安装依赖**
-    建议使用虚拟环境以避免包版本冲突。
+    建议使用`conda`管理虚拟环境，以避免包版本冲突。
     ```bash
-    python -m venv venv
-    # 激活虚拟环境 (Windows)
-    .\venv\Scripts\activate
-    # 激活虚拟环境 (macOS/Linux)
-    # source venv/bin/activate
+    # 创建名为 'ts-forecast' 的新环境 (会自动安装Python)
+    conda create -n ts-forecast python=3.8 -y
+
+    # 激活环境
+    conda activate ts-forecast
 
     # 安装依赖
     pip install -r requirements.txt
