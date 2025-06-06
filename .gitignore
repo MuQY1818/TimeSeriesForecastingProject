@@ -1,0 +1,28 @@
+# 忽略Python的缓存文件和编译文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 忽略虚拟环境文件夹
+env/
+venv/
+*.egg-info/
+
+# 忽略Jupyter Notebook的检查点文件
+.ipynb_checkpoints
+
+# 忽略IDE的配置文件
+.vscode/
+.idea/
+
+# 忽略操作系统的生成文件
+.DS_Store
+Thumbs.db
+
+# 忽略脚本运行后生成的模型和结果文件
+# 如果您希望在版本库中保留图表和预测csv，可以注释掉下面两行
+models/
+model_comparison.png
+model_predictions.csv 
