@@ -323,88 +323,137 @@ def train_neural_network(model, X_train, y_train, X_val, y_val, epochs=500, batc
     return model
 
 def plot_model_comparison(results, y_true, predictions):
-    """绘制模型对比结果"""
-    # 重新设计图表布局为2x2网格，以突出核心对比
-    fig = plt.figure(figsize=(18, 12))
-    gs = plt.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.2)
-
-    ax1 = fig.add_subplot(gs[0, :])  # [0, :] 表示占据第一行的所有列
-    ax2 = fig.add_subplot(gs[1, 1])
-    ax3 = fig.add_subplot(gs[1, 0])
-
-    # --- 子图1 (ax1): 所有模型预测总览 ---
-    colors = {
-        'XGBoost': '#1f77b4', 'LightGBM': '#ff7f0e', 'RandomForest': '#2ca02c',
-        'SimpleNN': '#9467bd', 'EnhancedNN': '#d62728',
-    }
-    
-    # 绘制所有模型的预测线，创建视觉层次
-    for model_name, pred in predictions.items():
-        if model_name == 'SimpleNN':
-            # 最重要的对比模型，使用独特且显眼的虚线
-            style = {'linestyle': '--', 'linewidth': 2.2, 'alpha': 1.0, 'zorder': 9}
-        elif model_name == 'RandomForest':
-            # 表现也很好，使用另一种独特的划线
-            style = {'linestyle': '-.', 'linewidth': 2.0, 'alpha': 0.8, 'zorder': 8}
-        else: # XGBoost, LightGBM, EnhancedNN 作为背景
-            style = {'linestyle': ':', 'linewidth': 1.5, 'alpha': 0.5, 'zorder': 5}
-            
-        ax1.plot(pred, label=model_name, color=colors.get(model_name, '#7f7f7f'), **style)
-
-    # 绘制实际值，使其最突出
-    ax1.plot(y_true, label='实际值', color='black', linewidth=2.5, marker='o', 
-             markersize=3, markerfacecolor='white', markeredgecolor='black', zorder=10)
-    
-    ax1.set_title('各模型预测结果总览', fontsize=16, pad=15)
-    ax1.set_xlabel('测试集样本索引', fontsize=12)
-    ax1.set_ylabel('销量', fontsize=12)
-    ax1.legend(loc='upper left', fontsize=10)
-    ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
-
-    # --- 子图2 (ax2): 误差指标对比 (使用对数尺度) ---
-    metrics = ['rmse', 'mae', 'smape', 'r2']
+    """
+    绘制模型比较图，现在包含预测对比和误差分析两个子图。
+    """
     model_names = list(results.keys())
-    x = np.arange(len(metrics))
-    width = 0.8 / len(model_names) # 动态调整柱子宽度
+    num_models = len(model_names)
     
+    # 获取颜色映射
+    colors = plt.cm.viridis(np.linspace(0, 1, num_models))
+    model_colors = {name: color for name, color in zip(model_names, colors)}
+
+    # 创建一个 (2, 1) 的子图布局
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(18, 14), sharex=True, 
+                                   gridspec_kw={'height_ratios': [3, 1]})
+    
+    # --- 子图1: 实际值 vs 预测值 ---
+    ax1.plot(y_true, label='实际值', color='black', linewidth=2, linestyle='--')
+    for model_name, pred in predictions.items():
+        ax1.plot(pred, label=f'{model_name} 预测', color=model_colors[model_name], alpha=0.8)
+    ax1.set_title('模型预测对比 (有特征工程)', fontsize=16)
+    ax1.set_ylabel('成交商品件数', fontsize=12)
+    ax1.legend()
+    ax1.grid(True)
+
+    # --- 子图2: 预测误差 ---
+    for model_name, pred in predictions.items():
+        error = y_true - pred
+        ax2.plot(error, label=f'{model_name} 误差', color=model_colors[model_name], alpha=0.7)
+    ax2.axhline(0, color='red', linestyle='--', linewidth=1)
+    ax2.set_title('预测误差 (真实值 - 预测值)', fontsize=16)
+    ax2.set_xlabel('测试集样本索引', fontsize=12)
+    ax2.set_ylabel('误差', fontsize=12)
+    ax2.grid(True)
+
+    # 调整整体布局并保存
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.suptitle('特征工程下各模型性能综合对比', fontsize=20, y=0.99)
+    
+    save_path = 'models/model_comparison.png'
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"\n对比图已保存至 {save_path}")
+    plt.close(fig)
+
+def calculate_permutation_importance(model, X_test, y_test, scaler):
+    """
+    计算神经网络模型的置换特征重要性。
+    返回一个包含各特征重要性分数的Numpy数组。
+    """
+    print(f"\n--- 正在计算 {model.__class__.__name__} 的置换特征重要性... ---")
+    
+    model.eval()
+
+    # 计算基准性能
+    is_sequence = len(X_test.shape) == 3
+    X_test_tensor = torch.FloatTensor(X_test)
+    with torch.no_grad():
+        base_preds_scaled = model(X_test_tensor).numpy()
+    base_preds = scaler.inverse_transform(base_preds_scaled)
+    base_mse = mean_squared_error(y_test, base_preds)
+    
+    importances = []
+    # 特征数量在最后一个维度
+    num_features = X_test.shape[-1]
+
+    for i in range(num_features):
+        X_permuted = X_test.copy()
+        
+        # 根据数据是扁平的还是序列化的，用不同方式打乱第i个特征
+        if is_sequence:
+            # 对于序列数据 (samples, seq_len, features)
+            # 我们打乱每个样本和时间步的第i个特征值
+            original_shape = X_permuted[:, :, i].shape
+            X_permuted[:, :, i] = np.random.permutation(X_permuted[:, :, i].flatten()).reshape(original_shape)
+        else:
+            # 对于扁平数据 (samples, features)
+            np.random.shuffle(X_permuted[:, i])
+        
+        X_permuted_tensor = torch.FloatTensor(X_permuted)
+        with torch.no_grad():
+            permuted_preds_scaled = model(X_permuted_tensor).numpy()
+        
+        permuted_preds = scaler.inverse_transform(permuted_preds_scaled)
+        permuted_mse = mean_squared_error(y_test, permuted_preds)
+        
+        # 重要性分数为MSE的增加值
+        importance = permuted_mse - base_mse
+        importances.append(importance)
+        
+    print(f"--- {model.__class__.__name__} 重要性计算完成 ---")
+    return np.array(importances)
+
+def plot_all_feature_importances(importance_dict, feature_names):
+    """
+    绘制所有模型的特征重要性对比图，采用 3x2 网格布局。
+    """
+    model_names = list(importance_dict.keys())
+    
+    # 创建一个 3x2 的网格布局
+    fig, axes = plt.subplots(3, 2, figsize=(20, 18))
+    axes = axes.flatten() # 将 3x2 的二维数组展平为一维
+
+    colors = plt.cm.viridis(np.linspace(0, 1, len(model_names)))
+    model_colors = {name: color for name, color in zip(model_names, colors)}
+
     for i, name in enumerate(model_names):
-        # 对R²分数进行特殊处理，因为它可能为负，不适合对数尺度
-        metric_values = [results[name][m] if m != 'r2' else max(results[name][m], 0.001) for m in metrics]
-        pos = x - (width * len(model_names) / 2) + i * width
-        bars = ax2.bar(pos, metric_values, width, label=name, color=colors.get(name, '#7f7f7f'))
-        # 在普通坐标中标注文本
-        for bar, metric_name in zip(bars, metrics):
-            true_value = results[name][metric_name]
-            ax2.text(bar.get_x() + bar.get_width() / 2., bar.get_height(), f'{true_value:.2f}',
-                     ha='center', va='bottom', fontsize=8, rotation=45)
+        ax = axes[i]
+        importances = importance_dict[name]
+        
+        feature_importance_df = pd.DataFrame({
+            'feature': feature_names,
+            'importance': importances
+        }).sort_values('importance', ascending=False).head(15)
 
-    ax2.set_yscale('log') # 使用对数尺度
-    # 使用Matplotlib的MathText来渲染R²，避免乱码
-    ax2.set_title('各模型误差指标对比 (对数尺度, $R^2$除外)', fontsize=16, pad=15)
-    ax2.set_ylabel('误差值 (log scale)', fontsize=12)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels([m.upper() for m in metrics])
-    ax2.legend(title='模型', fontsize=10)
-    ax2.grid(True, which='both', linestyle='--', linewidth=0.5, axis='y')
+        ax.barh(feature_importance_df['feature'], feature_importance_df['importance'], color=model_colors[name], alpha=0.8)
+        ax.set_title(f'{name} - 特征重要性 (Top 15)', fontsize=16)
+        ax.invert_yaxis()
+        ax.set_xlabel('重要性得分 (Importance Score)', fontsize=12)
 
-    # --- 子图3 (ax3): 核心焦点对比 (SimpleNN vs EnhancedNN) ---
-    ax3.plot(y_true, label='实际值', color='black', linewidth=2.5, zorder=10)
-    ax3.plot(predictions['SimpleNN'], label='SimpleNN 预测', color=colors['SimpleNN'], linestyle='--', linewidth=2)
-    ax3.plot(predictions['EnhancedNN'], label='EnhancedNN 预测', color=colors['EnhancedNN'], linestyle=':', linewidth=2, alpha=0.8)
+    # 隐藏最后一个未使用的子图
+    if len(model_names) < len(axes):
+        for i in range(len(model_names), len(axes)):
+            fig.delaxes(axes[i])
+
+    fig.suptitle('各模型特征重要性综合对比', fontsize=24, y=1.0)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
     
-    ax3.set_title('核心对比: SimpleNN vs. EnhancedNN', fontsize=16, pad=15)
-    ax3.set_xlabel('测试集样本索引', fontsize=12)
-    ax3.set_ylabel('销量', fontsize=12)
-    ax3.legend(loc='upper left', fontsize=10)
-    ax3.grid(True, which='both', linestyle='--', linewidth=0.5)
-    
-    # 调整整体布局
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.suptitle('模型性能综合评估', fontsize=20)
-    
-    # 保存图片
-    plt.savefig('models/model_comparison.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close()
+    save_path = 'models/all_models_feature_importance.png'
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"\n综合特征重要性图已保存至 {save_path}")
+    plt.close(fig)
 
 def evaluate_model(y_true, y_pred, model_name, nn_pred=None):
     """评估模型性能"""
@@ -556,6 +605,39 @@ def main():
     results_df['实际值'] = y_test_orig
     results_df.to_csv('models/model_predictions.csv', index=False)
     
+    # --- 进行可解释性分析 ---
+    print("\n--- 开始进行模型可解释性分析 ---")
+    
+    # 1. 计算所有模型的特征重要性
+    importances_xgb = xgb_model.feature_importances_
+    importances_lgbm = lgb_model.feature_importances_
+    importances_rf = rf_model.feature_importances_
+
+    importances_simple_nn = calculate_permutation_importance(
+        simple_nn, 
+        data['flat']['test'][0],
+        y_test_orig,
+        data['scalers'][1] # y_scaler
+    )
+    
+    importances_enhanced_nn = calculate_permutation_importance(
+        enhanced_nn,
+        data['seq']['test'][0],
+        y_test_orig,
+        data['scalers'][1] # y_scaler
+    )
+
+    # 2. 汇总并绘图
+    all_importances = {
+        'RandomForest': importances_rf,
+        'XGBoost': importances_xgb,
+        'LightGBM': importances_lgbm,
+        'SimpleNN (Permutation)': importances_simple_nn,
+        'EnhancedNN (Permutation)': importances_enhanced_nn
+    }
+    
+    plot_all_feature_importances(all_importances, data['feature_cols'])
+
     print("\n所有模型和结果已保存到models目录")
 
 if __name__ == "__main__":
