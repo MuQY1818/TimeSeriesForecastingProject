@@ -1,24 +1,68 @@
 {
     "judge_model": "SimpleNN",
-    "best_score_achieved": 0.8810767978259884,
+    "best_score_achieved": 0.912881915120928,
     "final_cross_val_scores": {
-        "LightGBM": 0.6606981521006795,
-        "RandomForest": 0.8652909069985664,
-        "XGBoost": 0.6576171550502705,
-        "SimpleNN": 0.8968435889669245,
-        "EnhancedNN (LSTM+Attn)": 0.8309094735733253
+        "LightGBM": {
+            "r2": 0.7196823300211592,
+            "mae": 22513.376256381485,
+            "rmse": 47026.301459410264
+        },
+        "RandomForest": {
+            "r2": 0.8996081571399763,
+            "mae": 16430.442570889343,
+            "rmse": 28142.637684109002
+        },
+        "XGBoost": {
+            "r2": 0.8467931518264755,
+            "mae": 17685.330083145887,
+            "rmse": 34765.99595825855
+        },
+        "SimpleNN": {
+            "r2": 0.9251066411410573,
+            "mae": 15297.904849172557,
+            "rmse": 24307.329071809647
+        },
+        "EnhancedNN (LSTM+Attn)": {
+            "r2": 0.8905472913824347,
+            "mae": 18258.739203210356,
+            "rmse": 29385.2129946484
+        }
     },
-    "best_feature_plan": [],
+    "best_feature_plan": [
+        {
+            "operation": "create_diff",
+            "feature": "sales",
+            "days": 30,
+            "id": "F10"
+        },
+        {
+            "operation": "create_rolling_std",
+            "feature": "sales",
+            "window": 7,
+            "id": "F11"
+        },
+        {
+            "operation": "create_time_features",
+            "feature": "date",
+            "components": [
+                "season",
+                "is_weekend"
+            ],
+            "id": "F12"
+        }
+    ],
     "final_feature_columns": [
         "date",
         "sales",
         "store_id",
         "product_category",
-        "sales_L1A",
-        "sales_T1A",
+        "sales_L7",
+        "sales_RM14",
         "sales_D1",
-        "sales_T1",
-        "sales_T7A",
-        "sales_D9A"
+        "sales_RS1",
+        "sales_EWM7",
+        "sales_Diff14",
+        "sales_Diff30",
+        "sales_RS7"
     ]
 }

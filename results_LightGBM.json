@@ -1,12 +1,32 @@
 {
     "judge_model": "LightGBM",
-    "best_score_achieved": 0.5555906204433123,
+    "best_score_achieved": 0.5532335919985587,
     "final_cross_val_scores": {
-        "LightGBM": 0.7149067456936047,
-        "RandomForest": 0.8941505421983752,
-        "XGBoost": 0.728403480190202,
-        "SimpleNN": 0.8913861133398193,
-        "EnhancedNN (LSTM+Attn)": 0.8649922726864678
+        "LightGBM": {
+            "r2": 0.7196823300211592,
+            "mae": 22513.376256381485,
+            "rmse": 47026.301459410264
+        },
+        "RandomForest": {
+            "r2": 0.9014084131240307,
+            "mae": 16321.523289125142,
+            "rmse": 27889.165189439977
+        },
+        "XGBoost": {
+            "r2": 0.8473898037277786,
+            "mae": 17633.547914323586,
+            "rmse": 34698.233214811364
+        },
+        "SimpleNN": {
+            "r2": 0.9258112499305953,
+            "mae": 15200.550254056876,
+            "rmse": 24192.71522379656
+        },
+        "EnhancedNN (LSTM+Attn)": {
+            "r2": 0.8727843029194668,
+            "mae": 18900.078726251206,
+            "rmse": 31680.05575414878
+        }
     },
     "best_feature_plan": [
         {
@@ -28,15 +48,15 @@
             "id": "F3"
         },
         {
-            "operation": "create_diff",
+            "operation": "create_rolling_std",
             "feature": "sales",
-            "days": 7,
+            "window": 7,
             "id": "F4"
         },
         {
-            "operation": "create_rolling_std",
+            "operation": "create_diff",
             "feature": "sales",
-            "window": 30,
+            "days": 1,
             "id": "F5"
         },
         {
@@ -46,58 +66,40 @@
             "id": "F6"
         },
         {
-            "operation": "create_diff",
-            "feature": "sales",
-            "days": 30,
-            "id": "F7"
-        },
-        {
             "operation": "create_ewm",
             "feature": "sales",
             "span": 7,
-            "id": "F8"
+            "id": "F7"
         },
         {
             "operation": "create_time_features",
             "feature": "date",
             "time_granularity": "quarter",
+            "id": "F8"
+        },
+        {
+            "operation": "create_diff",
+            "feature": "sales",
+            "days": 7,
             "id": "F9"
         },
         {
-            "operation": "create_lag",
+            "operation": "create_diff",
             "feature": "sales",
-            "days": 90,
+            "days": 30,
             "id": "F10"
         },
         {
-            "operation": "create_rolling_mean",
+            "operation": "create_rolling_std",
             "feature": "sales",
-            "window": 60,
+            "window": 14,
             "id": "F11"
         },
         {
             "operation": "create_time_features",
             "feature": "date",
-            "time_granularity": "holiday_indicator",
-            "id": "F12"
-        },
-        {
-            "operation": "create_diff",
-            "feature": "sales",
-            "days": 14,
-            "id": "F13"
-        },
-        {
-            "operation": "create_rolling_std",
-            "feature": "sales",
-            "window": 90,
-            "id": "F14"
-        },
-        {
-            "operation": "create_time_features",
-            "feature": "date",
             "time_granularity": "week_of_year",
-            "id": "F15"
+            "id": "F12"
         }
     ],
     "final_feature_columns": [
@@ -106,14 +108,12 @@
         "store_id",
         "product_category",
         "sales_L1A",
-        "sales_R1B",
-        "sales_D1",
-        "sales_T1",
-        "sales_F7",
-        "sales_F8",
-        "sales_L90",
-        "sales_RM60",
-        "sales_D2",
-        "sales_T2"
+        "sales_T1B",
+        "sales_T1C",
+        "sales_D1A",
+        "sales_T2A",
+        "sales_D2A",
+        "sales_D30A",
+        "sales_RS14A"
     ]
 }

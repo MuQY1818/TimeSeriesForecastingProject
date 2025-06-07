@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import json
 import warnings
 from openai import OpenAI
@@ -14,6 +14,7 @@ from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from sklearn.preprocessing import MinMaxScaler
 import joblib
+# import shap
 
 # --- PyTorch Imports for Neural Networks ---
 import torch
@@ -205,7 +206,7 @@ def execute_plan(df: pd.DataFrame, plan: list):
 
 # --- Evaluation and Visualization ---
 
-def visualize_final_predictions(dates, y_true, y_pred, best_model_name, judge_model_name):
+def visualize_final_predictions(dates, y_true, y_pred, best_model_name, judge_model_name, best_model_score):
     """Visualizes the best model's predictions against actual values."""
     plt.style.use('seaborn-v0_8-whitegrid')
     plt.figure(figsize=(18, 8))
@@ -213,7 +214,8 @@ def visualize_final_predictions(dates, y_true, y_pred, best_model_name, judge_mo
     plt.plot(dates, y_true, label='Actual Sales', color='dodgerblue', alpha=0.9, linewidth=2)
     plt.plot(dates, y_pred, label=f'Predicted Sales ({best_model_name})', color='orangered', linestyle='--', alpha=0.9, linewidth=2.5)
     
-    plt.title(f"Final Validation (Judge: {judge_model_name}) - Best Model: {best_model_name}", fontsize=18, fontweight='bold')
+    title_text = f"Final Validation (Judge: {judge_model_name}) - Best Model: {best_model_name}\n(R² = {best_model_score:.4f})"
+    plt.title(title_text, fontsize=18, fontweight='bold')
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Sales', fontsize=12)
     plt.legend(fontsize=12)
@@ -237,7 +239,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'L
     # --- END FIX ---
     
     eval_df = eval_df.dropna()
-    if eval_df.shape[0] < 50: return -99.0
+    if eval_df.shape[0] < 50: return -99.0, None
 
     X = eval_df.drop(columns=[c for c in [target_col, 'date'] if c in eval_df.columns])
     y = eval_df[target_col]
@@ -246,12 +248,29 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'L
     X_train, X_test = X[:train_size], X[train_size:]
     y_train, y_test = y[:train_size], y[train_size:]
     
-    if len(X_train) < 1 or len(X_test) < 1: return -99.0
+    if len(X_train) < 1 or len(X_test) < 1: return -99.0, None
+    
+    feature_importances = None
+    preds = None
         
     if model_name == 'LightGBM':
         model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.01, num_leaves=31, random_state=42, verbosity=-1)
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
+        if hasattr(model, 'feature_importances_'):
+            feature_importances = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
+    elif model_name == 'XGBoost':
+        model = XGBRegressor(random_state=42, n_estimators=100, learning_rate=0.1, max_depth=5, objective='reg:squarederror')
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        if hasattr(model, 'feature_importances_'):
+            feature_importances = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
+    elif model_name == 'RandomForest':
+        model = RandomForestRegressor(random_state=42, n_estimators=100, max_depth=10, n_jobs=1)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        if hasattr(model, 'feature_importances_'):
+            feature_importances = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
     elif model_name in ['SimpleNN', 'EnhancedNN (LSTM+Attn)']:
         scaler_X, scaler_y = MinMaxScaler(), MinMaxScaler()
         X_train_scaled = scaler_X.fit_transform(X_train)
@@ -259,18 +278,52 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'L
         y_train_scaled = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
         
         all_preds = []
-        for _ in range(N_STABILITY_RUNS):
+        # For SHAP, we only need one representative model and its predictions
+        final_model_for_shap = None
+        for i in range(N_STABILITY_RUNS):
             if model_name == 'SimpleNN': model = SimpleNN(input_size=X_train_scaled.shape[1])
             else: model = EnhancedNN(input_size=X_train_scaled.shape[1])
             preds_scaled = train_pytorch_model(model, X_train_scaled, y_train_scaled.flatten(), X_test_scaled, y_test.values, "LSTM" in model_name)
             all_preds.append(preds_scaled)
+            if i == N_STABILITY_RUNS - 1:
+                final_model_for_shap = model
         
         avg_preds_scaled = np.mean(all_preds, axis=0)
         preds = scaler_y.inverse_transform(avg_preds_scaled.reshape(-1, 1)).flatten()
+
+        # --- Permutation Importance Calculation for NN Models ---
+        if final_model_for_shap:
+            final_model_for_shap.eval() # Ensure model is in evaluation mode
+            baseline_score = r2_score(y_test, preds)
+            importances = []
+            device = next(final_model_for_shap.parameters()).device
+
+            for i in range(X_test_scaled.shape[1]):
+                X_test_permuted = X_test_scaled.copy()
+                np.random.shuffle(X_test_permuted[:, i])
+                
+                permuted_tensor = torch.FloatTensor(X_test_permuted).to(device)
+                if "LSTM" in model_name:
+                    permuted_tensor = permuted_tensor.unsqueeze(1)
+                    
+                with torch.no_grad():
+                    permuted_preds_scaled = final_model_for_shap(permuted_tensor).cpu().numpy()
+
+                permuted_preds = scaler_y.inverse_transform(permuted_preds_scaled.reshape(-1, 1)).flatten()
+                permuted_score = r2_score(y_test, permuted_preds)
+                
+                # Importance is the drop in score
+                importances.append(baseline_score - permuted_score)
+            
+            feature_importances = pd.Series(importances, index=X.columns).sort_values(ascending=False)
     else:
         raise ValueError(f"Unknown model_name '{model_name}' for evaluation.")
 
-    return r2_score(y_test, preds)
+    if preds is None:
+        return -99.0, None
+
+    score = r2_score(y_test, preds)
+    return score, feature_importances
 
 def evaluate_on_multiple_models(df, target_col, judge_model_name):
     """Evaluates the final feature set on all models, saves weights, and visualizes the best."""
@@ -305,7 +358,7 @@ def evaluate_on_multiple_models(df, target_col, judge_model_name):
     
     models = {
         "LightGBM": lgb.LGBMRegressor(random_state=42, n_estimators=100, learning_rate=0.1, num_leaves=31),
-        "RandomForest": RandomForestRegressor(random_state=42, n_estimators=100, max_depth=10, n_jobs=-1),
+        "RandomForest": RandomForestRegressor(random_state=42, n_estimators=100, max_depth=10, n_jobs=1),
         "XGBoost": XGBRegressor(random_state=42, n_estimators=100, learning_rate=0.1, max_depth=5, objective='reg:squarederror')
     }
     nn_models = {
@@ -324,8 +377,15 @@ def evaluate_on_multiple_models(df, target_col, judge_model_name):
         model.fit(X_train, y_train)
         predictions = model.predict(X_test)
         r2 = r2_score(y_test, predictions)
-        results[name] = r2
-        print(f"    -> {name} R² Score: {r2:.4f}")
+        mae = mean_absolute_error(y_test, predictions)
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        results[name] = {'r2': r2, 'mae': mae, 'rmse': rmse}
+        print(f"    -> {name} R²: {r2:.4f}, MAE: {mae:.2f}, RMSE: {rmse:.2f}")
+
+        if hasattr(model, 'feature_importances_'):
+            importances = pd.Series(model.feature_importances_, index=X_train.columns).sort_values(ascending=False)
+            print(f"      Top 5 Features for {name}:")
+            print(importances.head(5).to_string())
         
         joblib.dump(model, f"saved_models/judge_{judge_model_name}__{name}_model.joblib")
         if r2 > best_model_score: best_model_score, best_model_name, best_model_predictions = r2, name, predictions
@@ -344,15 +404,17 @@ def evaluate_on_multiple_models(df, target_col, judge_model_name):
         predictions = scaler_y.inverse_transform(avg_predictions_scaled.reshape(-1, 1)).flatten()
         
         r2 = r2_score(y_test, predictions)
-        results[name] = r2
-        print(f"    -> {name} Avg R² Score: {r2:.4f}")
+        mae = mean_absolute_error(y_test, predictions)
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        results[name] = {'r2': r2, 'mae': mae, 'rmse': rmse}
+        print(f"    -> {name} Avg R²: {r2:.4f}, MAE: {mae:.2f}, RMSE: {rmse:.2f}")
 
         # Note: We save the last trained NN model. For a fully deterministic result, one would train one final time.
         # This is sufficient for demonstrating the average performance.
         if r2 > best_model_score: best_model_score, best_model_name, best_model_predictions = r2, name, predictions
 
-    print(f"\n🏆 Best performing model in final validation: {best_model_name} (R² = {best_model_score:.4f})")
-    visualize_final_predictions(test_dates, y_test, best_model_predictions, best_model_name, judge_model_name)
+    print(f"\n🏆 Best performing model in final validation (by R²): {best_model_name} (R² = {best_model_score:.4f})")
+    visualize_final_predictions(test_dates, y_test, best_model_predictions, best_model_name, judge_model_name, best_model_score)
     return results
 
 # --- T-LAFS Algorithm Class ---
@@ -369,15 +431,21 @@ class TLAFS_Algorithm:
         self.best_df = self.base_df.copy()
         self.feature_id_counter = 1
         self.available_operations = {"lag_and_diff": ["create_lag", "create_diff"], "trend": ["create_rolling_mean", "create_rolling_std", "create_ewm"], "seasonality": ["create_time_features"]}
+        self.last_feature_importances = None
 
     def run(self):
-        print("\n" + "="*80 + "\n💡 Starting T-LAFS Algorithm v2 (Combo Exploration)...\n")
+        print("\n" + "="*80 + "\n💡 Starting T-LAFS Algorithm v4 (Feature-Importance-guided Feedback)...\n")
         current_df = self.base_df.copy()
         
         for i in range(self.n_iterations):
             print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Judge: {self.evaluation_model_name}) -----")
             
-            baseline_score = evaluate_performance(current_df, self.target_col, model_name=self.evaluation_model_name)
+            baseline_score, importances = evaluate_performance(current_df, self.target_col, model_name=self.evaluation_model_name)
+            if importances is not None:
+                self.last_feature_importances = importances
+                print("  - Current Feature Importances:")
+                print(self.last_feature_importances.head(5).to_string())
+
             if baseline_score > self.best_score:
                 self.best_score = baseline_score
                 self.best_plan = []
@@ -385,10 +453,21 @@ class TLAFS_Algorithm:
             print(f"  - Baseline score to beat: {self.best_score:.4f}")
             
             print("\nStep 1: Strategist LLM is devising a new feature combo plan...")
+            
+            importance_prompt_injection = ""
+            if self.last_feature_importances is not None:
+                top_features = self.last_feature_importances.head(3).index.tolist()
+                bottom_features = self.last_feature_importances.tail(3).index.tolist()
+                importance_prompt_injection = f"""
+                Based on the last run, the most impactful features were {top_features}, while the least impactful were {bottom_features}.
+                Your new plan should consider this feedback. Try to build upon what works, or propose alternatives for what doesn't.
+                """
+
             prompt_strategist = f"""
             As a master Time Series Analyst, your task is to propose a feature engineering plan to improve a sales forecasting model.
             The target variable is '{self.target_col}'. Current feature set: {list(current_df.columns)}.
             The history of past trials (higher R² score is better) is: {json.dumps(self.history, indent=2)}.
+            {importance_prompt_injection}
             Your available tools are grouped: Lag/Diff: {self.available_operations['lag_and_diff']}, Trend: {self.available_operations['trend']}, Seasonality: {self.available_operations['seasonality']}.
             Your mission: devise a "feature combo" of 2-3 DIVERSE, NEW features.
             Your output MUST be a valid JSON object with a key "feature_combo_plan" (a list of feature creation steps) and "rationale".
@@ -408,7 +487,7 @@ class TLAFS_Algorithm:
             print(f"✅ LLM Strategist proposed a new plan with rationale: '{rationale}'")
             print("\nStep 2: Evaluating the new feature combo plan...")
             temp_df_extended = execute_plan(current_df, plan_extension)
-            score = evaluate_performance(temp_df_extended, self.target_col, model_name=self.evaluation_model_name)
+            score, _ = evaluate_performance(temp_df_extended, self.target_col, model_name=self.evaluation_model_name)
             
             print(f"  - Score with new feature combo: {score:.4f}")
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
@@ -443,7 +522,7 @@ def main():
     """Main function to run the demo."""
     # --- CONFIGURATION ---
     # Options: 'LightGBM', 'RandomForest', 'XGBoost', 'SimpleNN', 'EnhancedNN (LSTM+Attn)'
-    SEARCH_MODEL_JUDGE = 'LightGBM' 
+    SEARCH_MODEL_JUDGE = 'EnhancedNN (LSTM+Attn)' 
     global N_STABILITY_RUNS; N_STABILITY_RUNS = 3
     # --- END CONFIGURATION ---
 
