@@ -1,0 +1,24 @@
+{
+    "judge_model": "SimpleNN",
+    "best_score_achieved": 0.8810767978259884,
+    "final_cross_val_scores": {
+        "LightGBM": 0.6606981521006795,
+        "RandomForest": 0.8652909069985664,
+        "XGBoost": 0.6576171550502705,
+        "SimpleNN": 0.8968435889669245,
+        "EnhancedNN (LSTM+Attn)": 0.8309094735733253
+    },
+    "best_feature_plan": [],
+    "final_feature_columns": [
+        "date",
+        "sales",
+        "store_id",
+        "product_category",
+        "sales_L1A",
+        "sales_T1A",
+        "sales_D1",
+        "sales_T1",
+        "sales_T7A",
+        "sales_D9A"
+    ]
+}

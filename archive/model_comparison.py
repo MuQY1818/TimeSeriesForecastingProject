@@ -44,23 +44,22 @@ def create_advanced_features(df, target_col='成交商品件数'):
     for i in range(1, 15):
         df_copy[f'lag_{i}'] = df_copy[target_col].shift(i)
     
-    # 移动平均特征
+    # 移动平均特征 (修复数据泄露：增加 .shift(1))
     for window in [7, 14, 30]:
-        df_copy[f'rolling_mean_{window}'] = df_copy[target_col].rolling(window=window, min_periods=1).mean()
-        df_copy[f'rolling_std_{window}'] = df_copy[target_col].rolling(window=window, min_periods=1).std()
-        df_copy[f'ma_ratio_{window}'] = df_copy[target_col] / df_copy[f'rolling_mean_{window}']
+        df_copy[f'rolling_mean_{window}'] = df_copy[target_col].rolling(window=window, min_periods=1).mean().shift(1)
+        df_copy[f'rolling_std_{window}'] = df_copy[target_col].rolling(window=window, min_periods=1).std().shift(1)
     
-    # 差分特征
-    df_copy['diff_1'] = df_copy[target_col].diff()
-    df_copy['diff_7'] = df_copy[target_col].diff(7)
+    # 差分特征 (修复数据泄露：增加 .shift(1))
+    df_copy['diff_1'] = df_copy[target_col].diff().shift(1)
+    df_copy['diff_7'] = df_copy[target_col].diff(7).shift(1)
     
-    # 趋势特征
+    # 趋势特征 (修复数据泄露：增加 .shift(1))
     df_copy['trend'] = df_copy[target_col].rolling(window=7, min_periods=1).apply(
         lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0
-    )
+    ).shift(1)
     
-    # 处理缺失值 (修正版)
-    df_copy = df_copy.bfill().ffill()
+    # 处理缺失值 (修复数据泄露：使用dropna()代替bfill)
+    df_copy.dropna(inplace=True)
     
     return df_copy
 
@@ -80,7 +79,6 @@ def get_feature_groups(feature_names):
         'lag': [],
         'rolling_mean': [],
         'rolling_std': [],
-        'ma_ratio': [],
         'diff_trend': []
     }
     # For dynamically generated features
@@ -91,8 +89,6 @@ def get_feature_groups(feature_names):
             groups['rolling_mean'].append(name)
         elif 'rolling_std' in name:
             groups['rolling_std'].append(name)
-        elif 'ma_ratio' in name:
-            groups['ma_ratio'].append(name)
         elif 'diff' in name or 'trend' in name:
             groups['diff_trend'].append(name)
     return groups
@@ -615,7 +611,7 @@ def evaluate_model(y_true, y_pred, model_name, nn_pred=None):
 
 def main():
     # 加载数据
-    df = pd.read_csv('total_cleaned.csv')
+    df = pd.read_csv('data/total_cleaned.csv')
     df['日期'] = pd.to_datetime(df['日期']) # 确保日期是datetime类型
     SEQUENCE_LENGTH = 14
     
