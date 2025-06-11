@@ -35,7 +35,7 @@ def setup_api_client():
         print(f"❌ Failed to initialize OpenAI client: {e}")
         exit()
 
-# --- Data Handling & CLP Specifics ---
+# --- Data Handling & DAP Specifics ---
 def get_time_series_data():
     """Loads the base temperature data."""
     csv_path = 'data/min_daily_temps.csv'
@@ -48,10 +48,10 @@ def get_time_series_data():
     # The 'store_id' and 'product_category' columns are not relevant for this dataset.
     return df
 
-def chrono_linguistic_tokenizer(series: pd.Series):
+def qualitative_tokenizer(series: pd.Series):
     """
     Transforms a numerical time series into a sequence of qualitative 'event' tokens.
-    This is the core of the CLP's 'linguistic' understanding.
+    This is the core of the DAP's 'linguistic' understanding.
     """
     pct_change = series.pct_change().bfill()
     # Define vocabulary: 0:Stable, 1:Mild_Inc, 2:Mild_Dec, 3:Sharp_Inc, 4:Sharp_Dec
@@ -116,8 +116,8 @@ class TransformerModel(nn.Module):
         x = self.output_layer(x.squeeze(1))
         return x
 
-# The NEW Probe Model
-class ChronoLanguageProbe(nn.Module):
+# The NEW Probe Model: Dual-stream Attention Probe (DAP)
+class DualStreamAttentionProbe(nn.Module):
     def __init__(self, quant_input_size, vocab_size, qual_embed_dim=16, d_model=64, nhead=4, num_layers=2):
         super().__init__()
         # 1. Two-Stream Input Embedding
@@ -171,7 +171,7 @@ def train_pytorch_model(model, X_train, y_train, X_test):
         preds_tensor = model(torch.FloatTensor(X_test).to(device))
     return preds_tensor.cpu().numpy().flatten()
 
-# --- Feature Engineering & Evaluation (Adapted for CLP) ---
+# --- Feature Engineering & Evaluation (Adapted for DAP) ---
 def execute_plan(df: pd.DataFrame, plan: list):
     """Executes a feature engineering plan with an expanded set of operators."""
     temp_df = df.copy()
@@ -272,8 +272,8 @@ The available operations are:
         print(f"❌ Error calling LLM: {e}")
         return [{"operation": "create_rolling_std", "feature": "temp", "window": 5, "id": "fallback_err"}]
 
-def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'CLP'):
-    """Evaluates performance, adapted to handle the CLP model's special data needs."""
+def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'DAP'):
+    """Evaluates performance, adapted to handle the DAP model's special data needs."""
     eval_df = df.dropna()
     if eval_df.shape[0] < 50: return -99.0, None
 
@@ -295,8 +295,8 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'C
     X_quant = eval_df[features]
     y = eval_df[target_col]
     
-    # CLP-specific linguistic features
-    X_qual = pd.DataFrame({f: chrono_linguistic_tokenizer(eval_df[f]) for f in features})
+    # DAP-specific linguistic features
+    X_qual = pd.DataFrame({f: qualitative_tokenizer(eval_df[f]) for f in features})
 
     # Split data
     train_size = int(len(X_quant) * 0.8)
@@ -315,8 +315,8 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'C
     # --- Model Training & Prediction ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if model_name == 'CLP':
-        model = ChronoLanguageProbe(quant_input_size=X_train_q_s.shape[1], vocab_size=5).to(device)
+    if model_name == 'DAP':
+        model = DualStreamAttentionProbe(quant_input_size=X_train_q_s.shape[1], vocab_size=5).to(device)
         optimizer = optim.Adam(model.parameters(), lr=0.001)
         criterion = nn.MSELoss()
         
@@ -339,7 +339,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'C
             preds_scaled = model(torch.FloatTensor(X_test_q_s).to(device), torch.LongTensor(X_test_l.values).to(device))
         preds = scaler_y.inverse_transform(preds_scaled.cpu()).flatten()
 
-    else: # Fallback to a simple model for non-CLP evaluation
+    else: # Fallback to a simple model for non-DAP evaluation
         model = lgb.LGBMRegressor(random_state=42)
         model.fit(X_train_q, y_train)
         preds = model.predict(X_test_q)
@@ -368,7 +368,7 @@ def visualize_final_predictions(dates, y_true, y_pred, best_model_name, judge_mo
     plt.title(f"Final Validation (Judge: {judge_model_name}) - Best Model: {best_model_name} (R² = {best_model_score:.4f})", fontsize=16)
     plt.legend()
     os.makedirs("plots", exist_ok=True)
-    plt.savefig(f"plots/final_predictions_judge_{judge_model_name}_CLP.png")
+    plt.savefig(f"plots/final_predictions_judge_{judge_model_name}_DAP.png")
     plt.show()
 
 def save_results_to_json(results_data, probe_name):
@@ -450,26 +450,26 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, judge_model_n
     X_test_s = scaler_X.transform(X_test)
     y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
     
-    # Pre-tokenize linguistic features for CLP
-    X_qual_train = pd.DataFrame({f: chrono_linguistic_tokenizer(X_train[f]) for f in features}).values
-    X_qual_test = pd.DataFrame({f: chrono_linguistic_tokenizer(X_test[f]) for f in features}).values
+    # Pre-tokenize linguistic features for DAP
+    X_qual_train = pd.DataFrame({f: qualitative_tokenizer(X_train[f]) for f in features}).values
+    X_qual_test = pd.DataFrame({f: qualitative_tokenizer(X_test[f]) for f in features}).values
 
     nn_model_defs = {
         "SimpleNN": SimpleNN(input_size=X_train.shape[1]),
         "EnhancedNN (LSTM+Attn)": EnhancedNN(input_size=X_train.shape[1]),
         "Transformer": TransformerModel(input_size=X_train.shape[1]),
-        "CLP": ChronoLanguageProbe(quant_input_size=X_train_s.shape[1], vocab_size=5)
+        "DAP": DualStreamAttentionProbe(quant_input_size=X_train_s.shape[1], vocab_size=5)
     }
     
     for name, model in nn_model_defs.items():
-        # Skip re-evaluating the judge if it's not the CLP (edge case)
-        if name == judge_model_name and name != "CLP": continue
+        # Skip re-evaluating the judge if it's not the DAP (edge case)
+        if name == judge_model_name and name != "DAP": continue
         
         print(f"  -> {name} R²: ", end="", flush=True)
         model.to(device)
         
         # Prepare data loader
-        if name == 'CLP':
+        if name == 'DAP':
             dataset = TensorDataset(torch.FloatTensor(X_train_s), torch.LongTensor(X_qual_train), torch.FloatTensor(y_train_s))
         else:
             dataset = TensorDataset(torch.FloatTensor(X_train_s), torch.FloatTensor(y_train_s))
@@ -482,7 +482,7 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, judge_model_n
         for epoch in range(50): # 50 epochs for final validation
             for batch in loader:
                 optimizer.zero_grad()
-                if name == 'CLP':
+                if name == 'DAP':
                     inputs_q, inputs_l, targets = batch
                     outputs = model(inputs_q.to(device), inputs_l.to(device))
                     targets = targets.to(device)
@@ -498,7 +498,7 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, judge_model_n
         # Evaluation
         model.eval()
         with torch.no_grad():
-            if name == 'CLP':
+            if name == 'DAP':
                 preds_s = model(torch.FloatTensor(X_test_s).to(device), torch.LongTensor(X_qual_test).to(device))
             else:
                 preds_s = model(torch.FloatTensor(X_test_s).to(device))
@@ -517,7 +517,7 @@ class TLAFS_Algorithm:
     Time-series Language-augmented Feature Search (T-LAFS) Algorithm.
     This class orchestrates the automated feature engineering process.
     """
-    def __init__(self, base_df, target_col, n_iterations=5, evaluation_model_name='CLP'):
+    def __init__(self, base_df, target_col, n_iterations=5, evaluation_model_name='DAP'):
         self.base_df = base_df
         self.target_col = target_col
         self.n_iterations = n_iterations
@@ -627,16 +627,16 @@ Task for Iteration {i+1}/{self.n_iterations}:
 
 
 def main():
-    """Main function to run the CLP experiment."""
+    """Main function to run the DAP experiment."""
     print("="*80)
-    print("🚀 T-LAFS Experiment: Chrono-Linguistic Probe (CLP)")
+    print("🚀 T-LAFS Experiment: Dual-stream Attention Probe (DAP)")
     print("="*80)
 
     setup_api_client() # You can re-enable this if you have set up your API keys
     base_df = get_time_series_data()
     target_col = 'temp'
     
-    tlafs = TLAFS_Algorithm(base_df=base_df, target_col=target_col, n_iterations=10, evaluation_model_name='CLP')
+    tlafs = TLAFS_Algorithm(base_df=base_df, target_col=target_col, n_iterations=10, evaluation_model_name='DAP')
     best_df, best_feature_plan, best_score_during_search = tlafs.run()
 
     # --- Final Validation and Executive Summary ---
