@@ -126,6 +126,23 @@ class EnhancedNN(nn.Module):
         output = self.regressor(context)
         return output
 
+class TransformerModel(nn.Module):
+    def __init__(self, input_size, d_model=64, nhead=4, num_encoder_layers=2, dim_feedforward=256, dropout=0.1):
+        super(TransformerModel, self).__init__()
+        self.d_model = d_model
+        self.input_layer = nn.Linear(input_size, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        self.output_layer = nn.Linear(d_model, 1)
+
+    def forward(self, x):
+        # Input x shape: (batch_size, seq_len, input_size), e.g., (32, 1, 10) for this script
+        x = self.input_layer(x)      # Shape: (batch_size, 1, d_model)
+        x = self.transformer_encoder(x) # Shape: (batch_size, 1, d_model)
+        x = x.squeeze(1)             # Shape: (batch_size, d_model)
+        x = self.output_layer(x)     # Shape: (batch_size, 1)
+        return x
+
 def train_pytorch_model(model, X_train, y_train, X_test, y_test, is_lstm=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -271,7 +288,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'L
         preds = model.predict(X_test)
         if hasattr(model, 'feature_importances_'):
             feature_importances = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
-    elif model_name in ['SimpleNN', 'EnhancedNN (LSTM+Attn)']:
+    elif model_name in ['SimpleNN', 'EnhancedNN (LSTM+Attn)', 'Transformer']:
         scaler_X, scaler_y = MinMaxScaler(), MinMaxScaler()
         X_train_scaled = scaler_X.fit_transform(X_train)
         X_test_scaled = scaler_X.transform(X_test)
@@ -282,8 +299,9 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'L
         final_model_for_shap = None
         for i in range(N_STABILITY_RUNS):
             if model_name == 'SimpleNN': model = SimpleNN(input_size=X_train_scaled.shape[1])
+            elif model_name == 'Transformer': model = TransformerModel(input_size=X_train_scaled.shape[1])
             else: model = EnhancedNN(input_size=X_train_scaled.shape[1])
-            preds_scaled = train_pytorch_model(model, X_train_scaled, y_train_scaled.flatten(), X_test_scaled, y_test.values, "LSTM" in model_name)
+            preds_scaled = train_pytorch_model(model, X_train_scaled, y_train_scaled.flatten(), X_test_scaled, y_test.values, "LSTM" in model_name or "Transformer" in model_name)
             all_preds.append(preds_scaled)
             if i == N_STABILITY_RUNS - 1:
                 final_model_for_shap = model
@@ -303,7 +321,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'L
                 np.random.shuffle(X_test_permuted[:, i])
                 
                 permuted_tensor = torch.FloatTensor(X_test_permuted).to(device)
-                if "LSTM" in model_name:
+                if "LSTM" in model_name or "Transformer" in model_name:
                     permuted_tensor = permuted_tensor.unsqueeze(1)
                     
                 with torch.no_grad():
@@ -363,7 +381,8 @@ def evaluate_on_multiple_models(df, target_col, judge_model_name):
     }
     nn_models = {
         "SimpleNN": SimpleNN(input_size=X_train_scaled.shape[1]),
-        "EnhancedNN (LSTM+Attn)": EnhancedNN(input_size=X_train_scaled.shape[1])
+        "EnhancedNN (LSTM+Attn)": EnhancedNN(input_size=X_train_scaled.shape[1]),
+        "Transformer": TransformerModel(input_size=X_train_scaled.shape[1])
     }
 
     results = {}
@@ -396,8 +415,9 @@ def evaluate_on_multiple_models(df, target_col, judge_model_name):
         for i in range(N_STABILITY_RUNS):
             print(f"    - Run {i+1}/{N_STABILITY_RUNS}...")
             if name == 'SimpleNN': fresh_model = SimpleNN(input_size=X_train_scaled.shape[1])
+            elif name == 'Transformer': fresh_model = TransformerModel(input_size=X_train_scaled.shape[1])
             else: fresh_model = EnhancedNN(input_size=X_train_scaled.shape[1])
-            predictions_scaled = train_pytorch_model(fresh_model, X_train_scaled, y_train_scaled.flatten(), X_test_scaled, y_test.values, "LSTM" in name)
+            predictions_scaled = train_pytorch_model(fresh_model, X_train_scaled, y_train_scaled.flatten(), X_test_scaled, y_test.values, "LSTM" in name or "Transformer" in name)
             all_final_preds.append(predictions_scaled)
 
         avg_predictions_scaled = np.mean(all_final_preds, axis=0)
@@ -448,7 +468,6 @@ class TLAFS_Algorithm:
 
             if baseline_score > self.best_score:
                 self.best_score = baseline_score
-                self.best_plan = []
                 self.best_df = current_df.copy()
             print(f"  - Baseline score to beat: {self.best_score:.4f}")
             
@@ -521,8 +540,8 @@ class TLAFS_Algorithm:
 def main():
     """Main function to run the demo."""
     # --- CONFIGURATION ---
-    # Options: 'LightGBM', 'RandomForest', 'XGBoost', 'SimpleNN', 'EnhancedNN (LSTM+Attn)'
-    SEARCH_MODEL_JUDGE = 'EnhancedNN (LSTM+Attn)' 
+    # Options: 'LightGBM', 'RandomForest', 'XGBoost', 'SimpleNN', 'EnhancedNN (LSTM+Attn)', 'Transformer'
+    SEARCH_MODEL_JUDGE = 'SimpleNN' 
     global N_STABILITY_RUNS; N_STABILITY_RUNS = 3
     # --- END CONFIGURATION ---
 
