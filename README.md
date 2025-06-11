@@ -1,107 +1,63 @@
-### T-LAFS：面向异构时序模型的自适应特征工程框架
+# T-LAFS: Time-series Language-augmented Feature Search
 
-本项目展示了 **T-LAFS (Time-series LLM-driven Adaptive Feature Synthesis)** 框架的最终成果。这是一个先进的系统，旨在为各类时间序列预测模型，自主地生成量身定制的特征。项目直面并深入探讨了机器学习中的一个核心挑战：**“特征-模型不匹配”**——即为某种模型架构优化的特征，反而可能损害另一类模型的性能。
+This project introduces **T-LAFS (Time-series Language-augmented Feature Search)**, an advanced, AI-driven framework for automated time-series feature engineering and forecasting.
 
-我们的研究最终产出了 T-LAFS v4 版本，这是一个统一的“灰盒”框架，能够基于其所优化的模型提供的直接反馈，智能地调整其特征工程策略。
+The core of this project is the `clp_probe_experiment.py` script, which demonstrates the full capabilities of the T-LAFS framework on a given time-series dataset.
 
-### “模型即探针”：一个更深刻的理解
+## Core Idea: Probe-and-Validate Strategy
 
-我们最初的“特征-模型不匹配”假说，在经过多轮实验后，演进为一个更精妙且更具解释力的概念：**“模型即探针” (Model as a Probe)**。
+T-LAFS utilizes a novel **"Probe-and-Validate"** strategy to achieve state-of-the-art forecasting performance.
 
-我们发现，不同的模型架构并非简单地与特征“匹配”或“不匹配”；相反，它们如同拥有不同“嗅觉”的**探针**，各自带有独特的结构性偏好，从而引导大型语言模型（LLM）去挖掘数据中不同**类型**的模式。
+1.  **Probe Phase**: An AI Strategist, powered by a Large Language Model (LLM), collaborates with a specialized "Probe" model (`ChronoLanguageProbe`). The LLM generates feature engineering plans (e.g., creating lags, interactions, rolling statistics) which are then executed. The `ChronoLanguageProbe` model, uniquely capable of understanding both quantitative data and qualitative "linguistic" patterns of change, evaluates the effectiveness of these new features. This iterative process allows the system to automatically search the vast feature space and discover an optimal set of features. The AI can also decide to prune less useful features, making the search more efficient.
 
-### 宏观实验结果
+2.  **Validate Phase**: Once the optimal feature set is discovered by the probe, it is handed off to a suite of diverse, powerful models (including LightGBM, RandomForest, XGBoost, and various Neural Networks like Transformers). These models are trained on the AI-generated features, and the best-performing model is selected as the final champion.
 
-我们运行了五组平行实验，分别以五种不同模型作为“裁判”，指导T-LAFS进行5轮特征迭代。每组实验产出的最优特征集，最终被用于评估所有模型的性能。全局R²分数汇总如下：
+This strategy ensures that the feature engineering is not overfitted to a single model architecture and that the discovered features are robust and widely effective.
 
-| **裁判模型** (特征集为该模型优化) | 搜索过程最优 R² | LightGBM | RandomForest | XGBoost | SimpleNN | **EnhancedNN (LSTM+Attn)** |
-| :-------------------------------- | :-------------: | :------: | :----------: | :-----: | :------: | :------------------------: |
-| LightGBM                          |      0.55       |   0.72   |     0.90     |  0.85   | **0.93** |            0.87            |
-| RandomForest                      |      0.86       |   0.68   |     0.87     |  0.78   | **0.88** |            0.76            |
-| XGBoost                           |      0.74       |   0.72   |     0.89     |  0.81   | **0.91** |            0.88            |
-| SimpleNN                          |    **0.91**     |   0.72   |     0.90     |  0.85   | **0.93** |            0.89            |
-| EnhancedNN (LSTM+Attn)            |    **0.88**     |   0.72   |     0.88     |  0.81   | **0.91** |          **0.90**          |
+## Key Features
 
----
+- **Automated Feature Engineering**: Leverages an LLM (e.g., GPT-4o) to intelligently add, create, and remove features.
+- **Dual-Stream Probe Model**: The custom `ChronoLanguageProbe` (PyTorch-based) model analyzes both numerical data and "linguistic" patterns of change (e.g., "sharp increase," "stable").
+- **Robust Validation**: The final feature set is validated against a wide range of standard and advanced models to ensure generalization.
+- **Data-Leakage Safe**: The entire framework is built with strict adherence to time-series principles, ensuring no future information is leaked during feature creation or model training.
+- **Result Persistence**: Automatically saves comprehensive experiment results, including the best feature plan and all model scores, to a JSON file in the `results/` directory.
 
-### T-LAFS v4 框架工作流程
+## Technology Stack
 
-T-LAFS 框架通过一个迭代的“提议-评估-采纳”循环，系统性地探索特征空间。其核心工作流程如下：
+- **Core**: Python 3.x
+- **AI/ML**:
+    - PyTorch
+    - Scikit-learn
+    - LightGBM
+    - XGBoost
+- **Data Handling**: Pandas, NumPy
+- **LLM Integration**: OpenAI API
+- **Plotting**: Matplotlib
 
-1.  **初始化**:
-    *   **选择“裁判模型”**: 从我们的模型库 (`LightGBM`, `RandomForest`, `XGBoost`, `SimpleNN`, `EnhancedNN`)中指定一个模型作为本轮实验的“裁判”。这个裁判的性能将是衡量特征好坏的唯一标准。
-    *   **起始数据集**: 仅从最原始的数据开始（例如，只有 `date` 和 `sales` 列）。
+## How to Run the Experiment
 
-2.  **迭代循环 (共5轮)**:
-    *   **步骤 1: 评估与反馈生成**:
-        *   使用当前的特征集，训练“裁判模型”，并得到一个基准性能分数（R²）。
-        *   **“灰盒”反馈**: 提取该模型的**特征重要性**排序。对于树模型，我们使用其内置的重要性度量；对于神经网络，我们使用更通用的**排列重要性 (Permutation Importance)**。
+1.  **Setup Environment**:
+    - Make sure you have Python installed.
+    - Install the required packages:
+      ```bash
+      pip install pandas numpy torch scikit-learn lightgbm xgboost openai matplotlib
+      ```
+2.  **Set API Keys**:
+    - For the LLM strategist to work, you must set your OpenAI API key and base URL as environment variables.
+      ```bash
+      export OPENAI_API_KEY="your_api_key"
+      export OPENAI_BASE_URL="your_base_url" # Optional, if using a proxy
+      ```
+      (On Windows, use `set` instead of `export`).
+      If you don't set these, the script will fall back to a pre-defined, non-AI plan.
 
-    *   **步骤 2: LLM 制定策略**:
-        *   向大型语言模型（LLM）发送一个结构化的指令。该指令包含了所有上下文信息：
-            *   **当前状态**: 已有的特征列表。
-            *   **历史记录**: 过去几轮尝试了什么特征、效果如何、是否被采纳。
-            *   **核心反馈**: 上一步生成的**特征重要性**报告（例如，“表现最好的3个特征是...，最差的3个是...”）。
-        *   LLM 的任务是：基于以上信息，设计一个包含2-3个多样化新特征的“组合包”，并以JSON格式返回其计划和设计理由。
-
-    *   **步骤 3: 执行与评估**:
-        *   框架解析LLM返回的JSON计划，在一个**临时**数据副本上执行这些操作（如 `create_lag`, `create_rolling_mean` 等）。
-        *   使用这个增强后的临时数据集，重新训练“裁判模型”，并计算新的性能分数。
-
-    *   **步骤 4: A/B测试与决策**:
-        *   **采纳**: 如果新分数 > 之前的最高分，则证明这是一个成功的“特征组合包”。我们会将其永久性地合并到主数据集中，并更新最高分记录。
-        *   **拒绝**: 如果新分数未能超越最高分，则丢弃这个临时数据集和该计划，返回到上一轮的最佳状态。
-
-3.  **最终交叉验证**:
-    *   在5轮迭代结束后，由该“裁判模型”主导筛选出的最终“最优特征集”，会被用于训练和评估**所有五个模型**。
-    *   这个步骤是为了进行全面的交叉验证，以检验这套为特定裁判定制的特征，在其他不同架构的模型上表现如何，从而揭示出“模型即探针”的深层规律。
-
----
-
-### 深度剖析：不同“探针”的工作方式
-
-#### 探针一：树模型（以 `RandomForest` 为例）—— 显式规则的挖掘者
-
-*   **探针特性**: 树模型擅长在高维空间中，根据信息增益寻找清晰的、非线性的决策边界。它的“偏好”是找到大量能够直接使用的、显式的判别规则。
-*   **特征产出**: `RandomForest` 作为裁判时，最终生成的特征集非常简洁，仅包含 `{一个7日差分, 一个15周期EWM, 一个星期几的时间特征}`。这表明它快速地找到了一个局部最优解，满足了其对强判别特征的需求。
-*   **结果分析**: 这个“简洁但高效”的特征集，对于其他树模型同样有效（XGBoost R²=0.78），但对于 `EnhancedNN (LSTM+Attn)` 来说，却是所有实验组中表现最差的（R²=0.76）。这完美地展示了探针的特异性：为 `RandomForest` 精心挖掘的显式规则，无法满足 `LSTM` 对学习深层时序依赖的需求。
-
-#### 探针二：`EnhancedNN (LSTM+Attn)` —— 时序动态的捕捉者
-
-*   **探针特性**: 作为一种序列模型，`EnhancedNN` 的结构偏好是捕捉数据内在的时间动态、变化和依赖关系。
-*   **LLM互动日志**:
-    *   在第3轮迭代后，LLM被告知，新加入的指数加权移动平均（EWM）特征 `sales_T1` 表现极为出色。
-    *   LLM的响应策略是：“*The proposed plan builds on the strengths of impactful features... The 30-day difference (D30) captures longer-term shifts in sales trends...*”。它正确地解读了反馈，并决定继续强化对“变化”和“趋势”的捕捉，提出了长周期差分特征。
-*   **特征产出**: 最终的特征集包含 `{7日滞后, 14日/7日滚动平均, 1日/30日差分, 滚动标准差, 7周期EWM}`。这是一个专注于描述**时序动态**的集合，充满了变化率、波动性和多尺度趋势的度量。
-*   **结果分析**: 这套为`EnhancedNN`量身定制的特征，最终也帮助它取得了0.90的最高分。同时，由于“时序动态”对于其他模型同样是极具价值的信息，这个特征集也表现出了不错的泛化能力。
-
-#### 探针三：`SimpleNN` —— 无偏见的通用探针
-
-*   **探针特性**: `SimpleNN` (一个基础的多层感知机) 是最有趣的探针。它没有树模型的分裂偏好，也没有序列模型的时序偏见。它是一个结构简单的“白板”。
-*   **LLM互动日志**:
-    *   为了提升这个“白板”模型的性能，LLM被迫去寻找那些**信息密度最高、最具普适性的核心特征**。
-    *   在第2轮迭代后，LLM发现滚动平均值 `sales_RM14` 效果很好，它的策略是：“*The proposed plan introduces diverse features... The 'create_diff' operation (D1) captures short-term changes... The 'create_rolling_std' operation (RS1) measures variability...*” 它没有陷入局部最优，而是围绕“趋势”这一核心，从“变化率”和“波动性”两个新维度进行拓展。
-*   **特征产出**: 最终的特征集 `{sales_L7, sales_RM14, sales_D1, sales_RS1, sales_EWM7, sales_Diff14, sales_Diff30, sales_RS7}` 是所有实验中最多样、最丰富的。它几乎囊括了所有类型的有效特征：短期滞后、多尺度趋势、多尺度变化率、多尺度波动性。
-*   **结果分析**: 这个由“无偏见探针”挖掘出的“全能特征集”，取得了惊人的成功。它不仅让 `SimpleNN` 自身获得了0.93的最高分，在**每一个交叉验证中都取得了最高或次高的成绩**。
-
-### 结论：从“特征不匹配”到“探针方法论”
-
-1.  **模型即探针**: 本研究的核心洞见是，不同的模型架构是挖掘数据信息的不同“探針”。它们的结构偏好决定了它们能发现什么样的特征。
-2.  **探针决定产出**: `RandomForest` 探针产出了“规则型”特征，`LSTM` 探针产出了“动态型”特征，而 `SimpleNN` 这个“通用探针”则产出了信息量最丰富的“基础元素型”特征。
-3.  **未来的方向：选择正确的探针**: 这项研究为自动化特征工程提供了一个全新的范式。关键决策不再是“我们应该创造什么特征？”，而是“**我们应该用什么样的‘探针’去发现特征？**”。为了找到泛化能力强的特征集，使用一个简单、无偏见的模型（如MLP）作为“特征星探”，可能是一个出乎意料但极为有效的策略。
-
-### 如何运行
-
-1.  **设置环境**:
+3.  **Run the script**:
     ```bash
-    pip install -r requirements.txt
+    python clp_probe_experiment.py
     ```
-2.  **设置API密钥**:
-    在您的环境中设置 `OPENAI_API_KEY`。如果使用代理，还需设置 `OPENAI_BASE_URL`。
-3.  **运行实验**:
-    打开 `t_lafs_demo.py` 文件。修改 `main` 函数中的 `SEARCH_MODEL_JUDGE` 变量为您想指定的裁判模型（可选值: `'LightGBM'`, `'RandomForest'`, `'XGBoost'`, `'SimpleNN'`, `'EnhancedNN (LSTM+Attn)'`）。
-    然后运行脚本：
-    ```bash
-    python t_lafs_demo.py
-    ```
-    实验结果（包括最终特征集、分数和日志）将会保存在 `results_{JudgeName}.json` 文件中，最终的预测图会保存在 `plots/` 目录下。
+
+The script will execute the full Probe-and-Validate pipeline. Final results, including plots and a JSON summary, will be saved to the `plots/` and `results/` directories respectively.
+
+## Example Result
+
+On the `min_daily_temps.csv` dataset, the T-LAFS framework was able to automatically discover a feature set that allowed a **Transformer** model to achieve a final **R² score of 0.9977**, showcasing the power of AI-driven feature discovery.
