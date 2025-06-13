@@ -6,7 +6,7 @@
         "qual_embed_dim": 16,
         "quant_embed_dim": 48
     },
-    "best_score_during_search": 0.9999119428897708,
+    "best_score_during_search": 0.9982081880997775,
     "best_feature_plan": [
         {
             "operation": "create_lag",
@@ -21,70 +21,97 @@
             "id": "T1A"
         },
         {
+            "operation": "create_time_features",
+            "feature": "date",
+            "extract": [
+                "dayofweek",
+                "month",
+                "quarter"
+            ],
+            "id": "T1B"
+        },
+        {
             "operation": "create_interaction",
             "features": [
                 "temp",
                 "temp_init"
             ],
-            "id": "T1B"
+            "id": "T2A"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "temp",
+                "temp_init"
+            ],
+            "id": "T3A"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "feature": "temp",
+            "window": 7,
+            "id": "T3B"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "temp",
+                "temp_T3B"
+            ],
+            "id": "T8A"
         },
         {
             "operation": "create_rolling_mean",
             "feature": "temp",
             "window": 3,
-            "id": "T2B"
-        },
-        {
-            "operation": "create_diff",
-            "feature": "temp",
-            "periods": 1,
-            "id": "T5A"
+            "id": "T8B"
         },
         {
             "operation": "create_interaction",
             "features": [
                 "temp",
-                "temp_init"
+                "temp_T1A"
             ],
-            "id": "T5B"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp_T5A",
-                "temp_x_temp_init_T5B"
-            ],
-            "id": "T7A"
+            "id": "T10A"
         },
         {
             "operation": "create_rolling_mean",
-            "feature": "temp_T2B",
+            "feature": "temp",
             "window": 7,
-            "id": "T7B"
+            "id": "T10B"
         }
     ],
     "final_features": [
         "temp_init",
         "temp_T1A",
-        "temp_x_temp_init_T1B",
-        "temp_T2B",
-        "temp_T5A",
-        "temp_x_temp_init_T5B",
-        "temp_T5A_x_temp_x_temp_init_T5B_T7A",
-        "temp_T2B_T7B"
+        "time_dayofweek_T1B",
+        "time_month_T1B",
+        "time_quarter_T1B",
+        "temp_x_temp_init_T2A",
+        "fourier_sin_1_365_T2B",
+        "fourier_cos_1_365_T2B",
+        "fourier_cos_2_365_T2B",
+        "fourier_sin_3_365_T2B",
+        "fourier_cos_3_365_T2B",
+        "temp_x_temp_init_T3A",
+        "temp_T3B",
+        "temp_x_temp_T3B_T8A",
+        "temp_T8B",
+        "temp_x_temp_T1A_T10A",
+        "temp_T10B"
     ],
     "final_validation_scores": {
-        "LightGBM": 0.9990550885230932,
-        "RandomForest": 0.9993697363161865,
-        "XGBoost": 0.9986637258935108,
-        "SimpleNN": 0.9986679958164383,
-        "EnhancedNN (LSTM+Attn)": 0.9975312391382897,
-        "Transformer": 0.9977476968053874,
-        "DAP": 0.9977194614682547
+        "LightGBM": 0.9968102071882946,
+        "RandomForest": 0.9971446033378083,
+        "XGBoost": 0.9952585162976711,
+        "SimpleNN": 0.9969055030389412,
+        "EnhancedNN (LSTM+Attn)": 0.9976966697783491,
+        "Transformer": 0.9916298812685648,
+        "DAP": 0.9962980701576124
     },
     "best_final_model": {
-        "name": "RandomForest",
-        "score": 0.9993697363161865
+        "name": "EnhancedNN (LSTM+Attn)",
+        "score": 0.9976966697783491
     },
     "run_history": [
         {
@@ -97,15 +124,17 @@
                     "id": "T1A"
                 },
                 {
-                    "operation": "create_interaction",
-                    "features": [
-                        "temp",
-                        "temp_init"
+                    "operation": "create_time_features",
+                    "feature": "date",
+                    "extract": [
+                        "dayofweek",
+                        "month",
+                        "quarter"
                     ],
                     "id": "T1B"
                 }
             ],
-            "score": 0.9962368480005129,
+            "score": 0.7210052345292222,
             "adopted": false
         },
         {
@@ -120,13 +149,14 @@
                     "id": "T2A"
                 },
                 {
-                    "operation": "create_rolling_mean",
-                    "feature": "temp",
-                    "window": 3,
+                    "operation": "create_fourier_features",
+                    "feature": "date",
+                    "period": 365.25,
+                    "order": 3,
                     "id": "T2B"
                 }
             ],
-            "score": 0.9980545907126298,
+            "score": 0.9911626379929948,
             "adopted": false
         },
         {
@@ -134,11 +164,11 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_T2B",
-                    "id": "D1"
+                    "feature": "temp_init",
+                    "id": "T3A"
                 }
             ],
-            "score": 0.9935113984922613,
+            "score": 0.9009865767110996,
             "adopted": false
         },
         {
@@ -150,37 +180,37 @@
                         "temp",
                         "temp_init"
                     ],
-                    "id": "I4A"
+                    "id": "T3A"
                 },
                 {
                     "operation": "create_rolling_mean",
                     "feature": "temp",
-                    "window": 5,
-                    "id": "I4B"
+                    "window": 7,
+                    "id": "T3B"
                 }
             ],
-            "score": 0.9965307121032244,
+            "score": 0.9946790863774572,
             "adopted": false
         },
         {
             "iteration": 5,
             "plan": [
                 {
-                    "operation": "create_diff",
-                    "feature": "temp",
-                    "periods": 1,
-                    "id": "T5A"
-                },
-                {
                     "operation": "create_interaction",
                     "features": [
                         "temp",
                         "temp_init"
                     ],
+                    "id": "T5A"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 7,
                     "id": "T5B"
                 }
             ],
-            "score": 0.999837077161598,
+            "score": 0.9914472233159093,
             "adopted": false
         },
         {
@@ -188,11 +218,11 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_x_temp_init_T2A",
+                    "feature": "temp_x_temp_init_T3A",
                     "id": "D6A"
                 }
             ],
-            "score": 0.9998930939920916,
+            "score": 0.9890333978834478,
             "adopted": false
         },
         {
@@ -201,19 +231,19 @@
                 {
                     "operation": "create_interaction",
                     "features": [
-                        "temp_T5A",
-                        "temp_x_temp_init_T5B"
+                        "temp",
+                        "temp_init"
                     ],
                     "id": "T7A"
                 },
                 {
                     "operation": "create_rolling_mean",
-                    "feature": "temp_T2B",
+                    "feature": "temp",
                     "window": 7,
                     "id": "T7B"
                 }
             ],
-            "score": 0.9999119428897708,
+            "score": 0.9933469628555709,
             "adopted": false
         },
         {
@@ -222,19 +252,19 @@
                 {
                     "operation": "create_interaction",
                     "features": [
-                        "temp_T5A",
-                        "temp_x_temp_init_T5B"
+                        "temp",
+                        "temp_T3B"
                     ],
-                    "id": "I8A"
+                    "id": "T8A"
                 },
                 {
                     "operation": "create_rolling_mean",
-                    "feature": "temp_T2B",
-                    "window": 7,
-                    "id": "R8B"
+                    "feature": "temp",
+                    "window": 3,
+                    "id": "T8B"
                 }
             ],
-            "score": 0.9997775139754811,
+            "score": 0.9964556285296439,
             "adopted": false
         },
         {
@@ -242,11 +272,11 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_T5A",
-                    "id": "D1"
+                    "feature": "fourier_sin_2_365_T2B",
+                    "id": "T9A"
                 }
             ],
-            "score": 0.9956526296793162,
+            "score": 0.9978634168711307,
             "adopted": false
         },
         {
@@ -255,19 +285,19 @@
                 {
                     "operation": "create_interaction",
                     "features": [
-                        "temp_T5A",
-                        "temp_x_temp_init_T5B"
+                        "temp",
+                        "temp_T1A"
                     ],
                     "id": "T10A"
                 },
                 {
-                    "operation": "create_rolling_skew",
-                    "feature": "temp_T2B",
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
                     "window": 7,
                     "id": "T10B"
                 }
             ],
-            "score": 0.9991598825185258,
+            "score": 0.9982081880997775,
             "adopted": false
         }
     ]
