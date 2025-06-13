@@ -16,8 +16,6 @@ import joblib
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
-from probes import ProbeFactory, DualStreamAttentionProbe
-import shap
 
 warnings.filterwarnings('ignore')
 
@@ -51,19 +49,8 @@ def get_time_series_data(dataset_type='min_daily_temps'):
         raise ValueError('Unknown dataset type')
     df['date'] = pd.to_datetime(df['date'])
     df.sort_values('date', inplace=True)
+    df.reset_index(drop=True, inplace=True)
     return df
-
-def qualitative_tokenizer(series: pd.Series):
-    """
-    Transforms a numerical time series into a sequence of qualitative 'event' tokens.
-    This is the core of the DAP's 'linguistic' understanding.
-    """
-    pct_change = series.pct_change().bfill()
-    # Define vocabulary: 0:Stable, 1:Mild_Inc, 2:Mild_Dec, 3:Sharp_Inc, 4:Sharp_Dec
-    bins = [-np.inf, -0.10, -0.02, 0.02, 0.10, np.inf]
-    labels = [4, 2, 0, 1, 3] # Sharp_Dec, Mild_Dec, Stable, Mild_Inc, Sharp_Inc
-    tokenized_series = pd.cut(pct_change, bins=bins, labels=labels, right=False)
-    return tokenized_series.to_numpy(dtype=np.int64)
 
 # --- Model Definitions ---
 
@@ -94,17 +81,14 @@ class Attention(nn.Module):
 class EnhancedNN(nn.Module): # LSTM + Attention
     def __init__(self, input_size, hidden_size=64, num_layers=2):
         super(EnhancedNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
-        self.attention = Attention(hidden_size)
+        self.attention = nn.Linear(hidden_size, 1)
         self.regressor = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        lstm_out, _ = self.lstm(x.unsqueeze(1), (h0, c0)) # Add sequence dim
-        context = self.attention(lstm_out)
+        lstm_out, _ = self.lstm(x.unsqueeze(1))
+        attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
+        context = torch.bmm(lstm_out.transpose(1, 2), attn_weights).squeeze(2)
         return self.regressor(context)
 
 class TransformerModel(nn.Module):
@@ -143,73 +127,123 @@ def train_pytorch_model(model, X_train, y_train, X_test):
         preds_tensor = model(torch.FloatTensor(X_test).to(device))
     return preds_tensor.cpu().numpy().flatten()
 
+# --- Learned Embedding Model ---
+class LearnedEmbedder(nn.Module):
+    """
+    A simple GRU-based model to create learned embeddings from a time-series window.
+    It acts as a feature extractor.
+    """
+    def __init__(self, input_dim=1, hidden_dim=32, embedding_dim=4, num_layers=2, dropout=0.1):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0
+        )
+        self.fc = nn.Linear(hidden_dim, embedding_dim)
+
+    def forward(self, x):
+        # x shape: (batch_size, seq_len, input_dim)
+        _, h_n = self.gru(x)
+        # h_n shape: (num_layers, batch_size, hidden_dim)
+        # Get the hidden state of the last layer
+        last_hidden = h_n[-1, :, :]
+        # last_hidden shape: (batch_size, hidden_dim)
+        embedding = self.fc(last_hidden)
+        # embedding shape: (batch_size, embedding_dim)
+        return embedding
+
+# --- Autoencoder Models for Pre-training ---
+class Encoder(nn.Module):
+    """Encodes a time-series sequence into a fixed-size embedding."""
+    def __init__(self, seq_len: int, embedding_dim: int, hidden_dim: int, num_layers: int, input_dim: int = 1):
+        super().__init__()
+        self.seq_len = seq_len
+        self.embedding_dim = embedding_dim
+        self.gru = nn.GRU(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_dim, embedding_dim)
+
+    def forward(self, x):
+        _, h_n = self.gru(x)
+        last_hidden = h_n[-1, :, :]
+        embedding = self.fc(last_hidden)
+        return embedding
+
+class Decoder(nn.Module):
+    """Decodes an embedding back into a time-series sequence."""
+    def __init__(self, embedding_dim: int, hidden_dim: int, num_layers: int, output_dim: int = 1):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=embedding_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x, seq_len):
+        x = x.unsqueeze(1).repeat(1, seq_len, 1)
+        output, _ = self.gru(x)
+        reconstruction = self.fc(output)
+        return reconstruction
+
+class TimeSeriesAutoencoder(nn.Module):
+    """Combines Encoder and Decoder for pre-training."""
+    def __init__(self, seq_len: int, embedding_dim: int, hidden_dim: int, num_layers: int, input_dim: int = 1):
+        super().__init__()
+        self.encoder = Encoder(seq_len=seq_len, embedding_dim=embedding_dim, hidden_dim=hidden_dim, num_layers=num_layers, input_dim=input_dim)
+        self.decoder = Decoder(embedding_dim=embedding_dim, hidden_dim=hidden_dim, num_layers=num_layers, output_dim=input_dim)
+
+    def forward(self, x):
+        embedding = self.encoder(x)
+        reconstruction = self.decoder(embedding, x.shape[1])
+        return reconstruction
+
+def pretrain_embedder(df_pretrain: pd.DataFrame, window_size: int, embedding_dim: int, hidden_dim: int, num_layers: int, epochs: int):
+    """Pre-trains an autoencoder on the time-series data and returns the trained encoder."""
+    input_dim = df_pretrain.shape[1]
+    print(f"  - Preparing data for autoencoder pre-training (window: {window_size}, embed_dim: {embedding_dim}, hidden_dim: {hidden_dim}, input_dim: {input_dim})...")
+    scaler = MinMaxScaler()
+    series_scaled = scaler.fit_transform(df_pretrain)
+    
+    sequences = []
+    for i in range(len(series_scaled) - window_size + 1):
+        sequences.append(series_scaled[i:i+window_size])
+    
+    if not sequences:
+        print("  - ⚠️ Warning: Not enough data to create sequences for pre-training. Returning untrained encoder.")
+        return Encoder(seq_len=window_size, embedding_dim=embedding_dim, hidden_dim=hidden_dim, num_layers=num_layers, input_dim=input_dim), scaler
+
+    dataset = torch.FloatTensor(np.array(sequences))
+    loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    autoencoder = TimeSeriesAutoencoder(seq_len=window_size, embedding_dim=embedding_dim, hidden_dim=hidden_dim, num_layers=num_layers, input_dim=input_dim).to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(autoencoder.parameters(), lr=0.005)
+
+    print(f"  - Pre-training Autoencoder on {len(dataset)} sequences for {epochs} epochs...")
+    for epoch in range(epochs):
+        for batch in loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            reconstructions = autoencoder(batch)
+            loss = criterion(reconstructions, batch)
+            loss.backward()
+            optimizer.step()
+        if (epoch + 1) % 5 == 0:
+            print(f"    Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.6f}")
+    
+    return autoencoder.encoder.to("cpu"), scaler
+
 # --- Feature Engineering & Evaluation (Adapted for DAP) ---
-def execute_plan(df: pd.DataFrame, plan: list):
-    """Executes a feature engineering plan with an expanded set of operators."""
-    temp_df = df.copy()
-    for step in plan:
-        op = step.get("operation")
-        try:
-            # Handle single-feature operations
-            if op in ["create_lag", "create_diff", "create_rolling_mean", "create_rolling_std", "create_ewm", "create_rolling_skew", "create_rolling_kurt", "create_rolling_min", "create_rolling_max"]:
-                feature = step.get("feature")
-                new_col_name = f"{feature}_{step.get('id', 'new')}"
-                if op == "create_lag": temp_df[new_col_name] = temp_df[feature].shift(int(step["days"]))
-                elif op == "create_diff": temp_df[new_col_name] = temp_df[feature].diff(int(step.get("periods", 1)))
-                elif op == "create_rolling_mean": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).mean().shift(1)
-                elif op == "create_rolling_std": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).std().shift(1)
-                elif op == "create_rolling_min": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).min().shift(1)
-                elif op == "create_rolling_max": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).max().shift(1)
-                elif op == "create_ewm": temp_df[new_col_name] = temp_df[feature].ewm(span=int(step["span"]), adjust=False).mean().shift(1)
-                elif op == "create_rolling_skew": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).skew().shift(1)
-                elif op == "create_rolling_kurt": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).kurt().shift(1)
-
-            # Handle date-based features
-            elif op == "create_time_features":
-                date_col = pd.to_datetime(temp_df[step.get("feature")])
-                for part in step.get("extract", []):
-                    new_col_name = f"time_{part}_{step.get('id', 'new')}"
-                    if part == "dayofweek": temp_df[new_col_name] = date_col.dt.dayofweek
-                    elif part == "month": temp_df[new_col_name] = date_col.dt.month
-                    elif part == "quarter": temp_df[new_col_name] = date_col.dt.quarter
-                    elif part == "dayofyear": temp_df[new_col_name] = date_col.dt.dayofyear
-                    elif part == "weekofyear": temp_df[new_col_name] = date_col.dt.isocalendar().week.astype(int)
-                    elif part == "is_weekend": temp_df[new_col_name] = (date_col.dt.dayofweek >= 5).astype(int)
-
-            # Handle Fourier Features for seasonality
-            elif op == "create_fourier_features":
-                date_col = pd.to_datetime(temp_df[step.get("feature")])
-                period = float(step["period"])
-                order = int(step["order"])
-                time_idx = (date_col - date_col.min()).dt.days
-                for k in range(1, order + 1):
-                    sin_col = f"fourier_sin_{k}_{int(period)}_{step.get('id', 'new')}"
-                    cos_col = f"fourier_cos_{k}_{int(period)}_{step.get('id', 'new')}"
-                    temp_df[sin_col] = np.sin(2 * np.pi * k * time_idx / period)
-                    temp_df[cos_col] = np.cos(2 * np.pi * k * time_idx / period)
-            
-            # Handle multi-feature interactions
-            elif op == "create_interaction":
-                features = step.get("features", [])
-                if len(features) == 2:
-                    new_col_name = f"{features[0]}_x_{features[1]}_{step.get('id', 'new')}"
-                    temp_df[new_col_name] = temp_df[features[0]] * temp_df[features[1]]
-
-            # Handle feature deletion
-            elif op == "delete_feature":
-                feature_to_delete = step.get("feature")
-                if feature_to_delete in temp_df.columns:
-                    # Safety check to prevent deleting core columns
-                    if feature_to_delete not in ['temp', 'date']:
-                        temp_df.drop(columns=[feature_to_delete], inplace=True)
-                        print(f"  - Successfully deleted feature: {feature_to_delete}")
-                    else:
-                        print(f"  - ⚠️ Warning: Attempted to delete protected feature '{feature_to_delete}'. Skipped.")
-
-        except Exception as e:
-            print(f"⚠️ Warning: Could not execute step {step}. Error: {e}")
-    return temp_df
-
 def call_strategist_llm(context: str):
     """
     Calls the LLM to get a feature engineering plan.
@@ -222,35 +256,21 @@ def call_strategist_llm(context: str):
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4o", # or your preferred model
+            model="gpt-4-turbo-preview",
             messages=[
                 {
                     "role": "system",
                     "content": """You are an expert Data Scientist specializing in time-series forecasting. 
 Your task is to devise a feature engineering plan to improve a model's R^2 score.
 You will be given the current features, their importance, and a list of available operations.
+CRITICALLY, you will also receive a history of previously rejected plans. Learn from these past failures and avoid suggesting identical or very similar plans. 
+Your goal is to explore novel combinations, considering SHORT-TERM (e.g., lags), LONG-TERM (e.g., Fourier features for seasonality), and LEARNED REPRESENTATIONS from a pre-trained autoencoder.
 Your response MUST be a valid JSON object with a single key "plan", where the value is a list of dictionaries. Each dictionary represents one operation.
-Example: {"plan": [{"operation": "create_rolling_mean", "feature": "temp", "window": 7, "id": "T1A"}]}
-Do NOT add any extra text, explanations, or markdown formatting around the JSON response.
-You will also receive a 'SHAP Contribution' score for each feature. This score is the correlation between a feature's value and its impact on the model's prediction.
-- A high positive value (e.g., > 0.5) means the feature has a positive relationship with the target (higher value -> higher prediction).
-- A high negative value (e.g., < -0.5) means a negative relationship (higher value -> lower prediction).
-- A value near 0 suggests a complex, non-monotonic, or weak relationship.
-Use this directional information to make more intelligent feature engineering decisions.
-The available operations are:
-- `create_lag`: { "operation": "create_lag", "feature": "<feature_name>", "days": <int>, "id": "<unique_id>" }
-- `create_diff`: { "operation": "create_diff", "feature": "<feature_name>", "periods": <int>, "id": "<unique_id>" }
-- `create_rolling_mean`: { "operation": "create_rolling_mean", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_rolling_std`: { "operation": "create_rolling_std", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_rolling_min`: { "operation": "create_rolling_min", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_rolling_max`: { "operation": "create_rolling_max", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_ewm`: { "operation": "create_ewm", "feature": "<feature_name>", "span": <int>, "id": "<unique_id>" }
-- `create_rolling_skew`: { "operation": "create_rolling_skew", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_rolling_kurt`: { "operation": "create_rolling_kurt", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_time_features`: { "operation": "create_time_features", "feature": "date", "extract": ["dayofweek", "month", "quarter", "dayofyear", "weekofyear", "is_weekend"], "id": "<unique_id>" }
-- `create_fourier_features`: { "operation": "create_fourier_features", "feature": "date", "period": <float>, "order": <int>, "id": "<unique_id>" } (Captures seasonality. `period` is season length e.g. 365.25 for annual, 7 for weekly. `order` is number of sin/cos pairs.)
-- `create_interaction`: { "operation": "create_interaction", "features": ["<numeric_feature1>", "<numeric_feature2>"], "id": "<unique_id>" } (NOTE: Both features must be numeric)
-- `delete_feature`: { "operation": "delete_feature", "feature": "<feature_to_delete>", "id": "<unique_id>" }
+The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
+Example for a complex plan: {"plan": [{"operation": "create_fourier_features", "feature": "date", "period": 365.25, "order": 2, "id": "F_Year"}, {"operation": "create_learned_embedding", "feature": "temp", "id": "LE_Month"}]}
+Note: For `create_learned_embedding`, the window size and embedding dimension are fixed by the pre-trained model. You only need to provide the source feature and an ID.
+Do not suggest features that already exist in the 'Available Features' list.
+Do not suggest deleting the last remaining feature.
 """
                 },
                 {
@@ -269,180 +289,35 @@ The available operations are:
         print(f"❌ Error calling LLM: {e}")
         return [{"operation": "create_rolling_std", "feature": "temp", "window": 5, "id": "fallback_err"}]
 
-def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'DAP'):
-    """Evaluates performance, adapted to handle different probe models."""
-    eval_df = df.dropna()
-    if eval_df.shape[0] < 50: return -99.0, None, None
+def evaluate_performance(df: pd.DataFrame, target_col: str):
+    """
+    Evaluates feature set performance using a fast and robust LightGBM model.
+    This function serves as the "judge" for each T-LAFS iteration.
+    """
+    # 1. Prepare Data
+    df_feat = df.drop(columns=['date', target_col]).dropna()
+    y = df.loc[df_feat.index][target_col]
+    X = df_feat
 
-    # Standard features for all models
-    features = [c for c in eval_df.columns if c not in [target_col, 'date', 'store_id', 'product_category']]
+    if X.empty:
+        print("  - ⚠️ Warning: Feature set is empty after dropping NaNs. Returning poor score.")
+        return -1.0, pd.Series(dtype=float), pd.Series(dtype=float)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
+
+    # 2. Model Training, Prediction & Importance
+    lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=100, verbosity=-1)
+    lgb_model.fit(X_train, y_train)
     
-    # --- FIX: Ensure only numeric features are used for modeling ---
-    numeric_features = [f for f in features if pd.api.types.is_numeric_dtype(eval_df[f])]
-    if len(features) > len(numeric_features):
-        non_numeric = set(features) - set(numeric_features)
-        print(f"  - ⚠️ Warning: Ignoring non-numeric columns in this evaluation: {list(non_numeric)}")
-    features = numeric_features
-    # --- END FIX ---
-
-    if not features:
-        print("  - ⚠️ Warning: No numeric features found to evaluate.")
-        return -99.0, None, None
-
-    X_quant = eval_df[features]
-    y = eval_df[target_col]
+    predictions = lgb_model.predict(X_test)
+    score = r2_score(y_test, predictions)
     
-    # DAP-specific linguistic features
-    X_qual = pd.DataFrame({f: qualitative_tokenizer(eval_df[f]) for f in features})
-
-    # Split data
-    train_size = int(len(X_quant) * 0.8)
-    X_train_q, X_test_q = X_quant[:train_size], X_quant[train_size:]
-    X_train_l, X_test_l = X_qual[:train_size], X_qual[train_size:]
-    y_train, y_test = y[:train_size], y[train_size:]
-
-    if len(X_train_q) < 1: return -99.0, None, None
-
-    # Scale quantitative data
-    scaler_X, scaler_y = MinMaxScaler(), MinMaxScaler()
-    X_train_q_s = scaler_X.fit_transform(X_train_q)
-    X_test_q_s = scaler_X.transform(X_test_q)
-    y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
-
-    # --- Model Training & Prediction ---
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    shap_values_quant = None
+    importances = pd.Series(lgb_model.feature_importances_, index=X.columns)
     
-    if model_name in ['DAP', 'quantum_dual_stream', 'bayesian_quantum']:
-        # 使用探针工厂创建模型
-        probe_name_for_factory = 'dual_stream' if model_name == 'DAP' else model_name
-        model = ProbeFactory.create_probe(
-            probe_name_for_factory,
-            quant_input_size=X_train_q_s.shape[1],
-            vocab_size=5
-        ).to(device)
-        
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
-        criterion = nn.MSELoss()
-        
-        dataset = TensorDataset(torch.FloatTensor(X_train_q_s), torch.LongTensor(X_train_l.values), torch.FloatTensor(y_train_s))
-        loader = DataLoader(dataset, batch_size=32, shuffle=True)
-        
-        # Training loop
-        model.train()
-        for epoch in range(50): # 50 epochs for demonstration
-            for x_q, x_l, y_t in loader:
-                optimizer.zero_grad()
-                pred = model(x_q.to(device), x_l.to(device))
-                loss = criterion(pred, y_t.to(device))
-                loss.backward()
-                optimizer.step()
-        
-        # Prediction
-        model.eval()
-        with torch.no_grad():
-            preds_scaled = model(torch.FloatTensor(X_test_q_s).to(device), torch.LongTensor(X_test_l.values).to(device))
-        preds = scaler_y.inverse_transform(preds_scaled.cpu()).flatten()
+    # SHAP contributions are deprecated, return empty series for compatibility
+    shap_contributions = pd.Series(dtype=float)
 
-        # SHAP for PyTorch models using KernelExplainer as a last resort
-        # Add a safety check: KernelExplainer's kmeans summary can be unstable with very few features.
-        if X_train_q_s.shape[1] > 2:
-            try:
-                # 1. Create a wrapper function for the model
-                # KernelExplainer needs a function that takes a numpy array and returns a numpy array.
-                def f(x):
-                    # x is a numpy array of shape (n_samples, n_features)
-                    # It will be a mix of quantitative and qualitative features, so we need to split them.
-                    n_quant = X_train_q_s.shape[1]
-                    x_quant_part = x[:, :n_quant]
-                    x_qual_part = x[:, n_quant:]
-
-                    # Convert to tensors
-                    quant_tensor = torch.FloatTensor(x_quant_part).to(device)
-                    qual_tensor = torch.LongTensor(x_qual_part).to(device)
-                    
-                    # Run model
-                    model.eval()
-                    with torch.no_grad():
-                        predictions_scaled = model(quant_tensor, qual_tensor)
-                    
-                    return predictions_scaled.cpu().numpy()
-
-                # 2. Create the background dataset for KernelExplainer
-                # We combine quant and qual training data and summarize it using k-means.
-                X_train_combined = np.hstack([X_train_q_s, X_train_l.values])
-                # Use a smaller sample for k-means to speed it up
-                background_data_summary = shap.kmeans(X_train_combined, 10) # 10 centers
-
-                # 3. Create and run the explainer
-                explainer = shap.KernelExplainer(f, background_data_summary)
-                
-                # Combine test data for explanation
-                X_test_combined = np.hstack([X_test_q_s, X_test_l.values])
-                
-                # Explain a smaller sample to avoid excessive runtimes
-                sample_size_for_shap = 50 
-                shap_values_combined = explainer.shap_values(X_test_combined[:sample_size_for_shap, :], nsamples=50)
-                
-                # We are interested in the SHAP values for the quantitative inputs only
-                shap_values_quant = shap_values_combined[:, :X_train_q_s.shape[1]]
-
-            except Exception as e:
-                print(f"  - ⚠️ Warning: SHAP calculation failed for {model_name}: {e}")
-        else:
-            print(f"  - ℹ️ Info: Skipping SHAP calculation for low feature count ({X_train_q_s.shape[1]}) to ensure stability.")
-
-    else: # Fallback to a simple model for non-probe evaluation
-        model = lgb.LGBMRegressor(random_state=42)
-        model.fit(X_train_q, y_train)
-        preds = model.predict(X_test_q)
-        # SHAP for tree-based models
-        try:
-            explainer = shap.TreeExplainer(model)
-            shap_values_quant = explainer.shap_values(X_test_q)
-        except Exception as e:
-            print(f"  - ⚠️ Warning: SHAP calculation failed for LGBM: {e}")
-    
-    score = r2_score(y_test, preds)
-
-    # Permutation Importance (always do this for feedback)
-    importances = []
-    baseline_score = r2_score(y_test, preds)
-    for i, col in enumerate(X_quant.columns):
-        X_test_q_perm = X_test_q.copy()
-        X_test_q_perm[col] = np.random.permutation(X_test_q_perm[col])
-        # ... logic to get permuted predictions ...
-        # This part is complex and needs full implementation, for now we fake it
-        importances.append(baseline_score - (score * np.random.uniform(0.9, 1.0))) # Fake importance
-    
-    feature_importances = pd.Series(importances, index=X_quant.columns).sort_values(ascending=False)
-    
-    # Calculate SHAP Contribution (Directional Importance)
-    shap_contributions = None
-    if shap_values_quant is not None:
-        contributions = {}
-        # We only have SHAP values for a sample of the test set, so we match that sample size.
-        num_shap_samples = shap_values_quant.shape[0]
-        
-        for i, col in enumerate(X_test_q.columns):
-            # Correlation between feature values and their SHAP values
-            feature_values = X_test_q[col].values[:num_shap_samples] # Match the sample size
-            # Flatten the SHAP values to ensure the shape is (n_samples,) to match feature_values
-            shap_vals_for_feat = shap_values_quant[:, i].flatten()
-            
-            # Avoid correlation with constant feature
-            if feature_values.std() > 0:
-                try:
-                    corr = np.corrcoef(feature_values, shap_vals_for_feat)[0, 1]
-                    contributions[col] = np.nan_to_num(corr) # Handle potential NaNs
-                except ValueError:
-                    # This can happen in rare cases if shapes are still mismatched for some reason.
-                    contributions[col] = 0.0
-            else:
-                contributions[col] = 0.0
-        shap_contributions = pd.Series(contributions).sort_values(ascending=False)
-
-    return score, feature_importances, shap_contributions
+    return score, importances.sort_values(ascending=False), shap_contributions
 
 def visualize_final_predictions(dates, y_true, y_pred, best_model_name, judge_model_name, best_model_score):
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -481,242 +356,385 @@ def save_results_to_json(results_data, probe_name):
 def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, judge_model_name: str):
     """
     Evaluates the final feature set on a variety of models.
-    Returns scores and prediction details for visualization.
+    This now uses the static, correct execute_plan method from TLAFS_Algorithm.
     """
-    eval_df = df.dropna()
-    if eval_df.shape[0] < 50:
-        return {}, {}
-
-    features = [c for c in eval_df.columns if c not in [target_col, 'date', 'store_id', 'product_category']]
+    print(f"Evaluating final feature set on various models (Judge was: {judge_model_name})...")
     
-    # --- FIX: Ensure only numeric features are used for modeling ---
-    numeric_features = [f for f in features if pd.api.types.is_numeric_dtype(eval_df[f])]
-    if len(features) > len(numeric_features):
-        non_numeric = set(features) - set(numeric_features)
-        print(f"  - ⚠️ Warning: Ignoring non-numeric columns in final validation: {list(non_numeric)}")
-    features = numeric_features
-    # --- END FIX ---
+    # This plan is not executed, it's just for reference if needed.
+    # The dataframe `df` is already the one with the best features.
     
-    if not features:
-        print("  - ⚠️ Error: No numeric features available for final validation.")
-        return {}, {}
+    X = df.drop(columns=['date', target_col])
+    y = df[target_col]
 
-    X = eval_df[features]
-    y = eval_df[target_col]
-
-    train_size = int(len(X) * 0.8)
-    X_train, X_test = X[:train_size], X[train_size:]
-    y_train, y_test = y[:train_size], y[train_size:]
-    test_dates = eval_df['date'][train_size:]
-
-    if len(X_train) < 1:
-        return {}, {}
-    
-    model_scores = {}
-    model_results = {} # To store predictions for visualization
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # 1. Tree-based Models
-    tree_models = {
-        "LightGBM": lgb.LGBMRegressor(random_state=42),
-        "RandomForest": RandomForestRegressor(random_state=42),
-        "XGBoost": XGBRegressor(random_state=42)
-    }
-    for name, model in tree_models.items():
-        print(f"  -> {name} R²: ", end="", flush=True)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
-        score = r2_score(y_test, preds)
-        model_scores[name] = score
-        model_results[name] = {'dates': test_dates, 'y_true': y_test, 'y_pred': preds}
-        print(f"{score:.4f}")
-
-    # 2. PyTorch NN Models
-    scaler_X, scaler_y = MinMaxScaler(), MinMaxScaler()
-    X_train_s = scaler_X.fit_transform(X_train)
-    X_test_s = scaler_X.transform(X_test)
-    y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
-    
-    # Pre-tokenize linguistic features for DAP
-    X_qual_train = pd.DataFrame({f: qualitative_tokenizer(X_train[f]) for f in features}).values
-    X_qual_test = pd.DataFrame({f: qualitative_tokenizer(X_test[f]) for f in features}).values
-
-    nn_model_defs = {
-        "SimpleNN": SimpleNN(input_size=X_train.shape[1]),
-        "EnhancedNN (LSTM+Attn)": EnhancedNN(input_size=X_train.shape[1]),
-        "Transformer": TransformerModel(input_size=X_train.shape[1]),
-        "DAP": DualStreamAttentionProbe(quant_input_size=X_train_s.shape[1], vocab_size=5)
+    models = {
+        'LightGBM': lgb.LGBMRegressor(random_state=42),
+        'RandomForest': RandomForestRegressor(random_state=42),
+        'XGBoost': XGBRegressor(random_state=42),
+        'SimpleNN': SimpleNN(X.shape[1]),
+        'EnhancedNN': EnhancedNN(X.shape[1]),
+        'Transformer': TransformerModel(X.shape[1])
     }
     
-    for name, model in nn_model_defs.items():
-        # Skip re-evaluating the judge if it's not the DAP (edge case)
-        if name == judge_model_name and name != "DAP": continue
-        
-        print(f"  -> {name} R²: ", end="", flush=True)
-        model.to(device)
-        
-        # Prepare data loader
-        if name == 'DAP':
-            dataset = TensorDataset(torch.FloatTensor(X_train_s), torch.LongTensor(X_qual_train), torch.FloatTensor(y_train_s))
+    final_scores = {}
+    final_results = {}
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
+    
+    scaler = MinMaxScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_test_s = scaler.transform(X_test)
+    y_train_s = scaler.fit_transform(y_train.values.reshape(-1, 1))
+
+    for name, model in models.items():
+        print(f"  - Evaluating {name}...")
+        if name in ['SimpleNN', 'EnhancedNN', 'Transformer']:
+            preds_scaled = train_pytorch_model(model, X_train_s, y_train_s, X_test_s)
+            preds = scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
         else:
-            dataset = TensorDataset(torch.FloatTensor(X_train_s), torch.FloatTensor(y_train_s))
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
         
-        loader = DataLoader(dataset, batch_size=32, shuffle=True)
-        criterion, optimizer = nn.MSELoss(), optim.Adam(model.parameters(), lr=0.001)
-
-        # Training loop
-        model.train()
-        for epoch in range(50): # 50 epochs for final validation
-            for batch in loader:
-                optimizer.zero_grad()
-                if name == 'DAP':
-                    inputs_q, inputs_l, targets = batch
-                    outputs = model(inputs_q.to(device), inputs_l.to(device))
-                    targets = targets.to(device)
-                else:
-                    inputs, targets = batch
-                    outputs = model(inputs.to(device))
-                    targets = targets.to(device)
-                
-                loss = criterion(outputs, targets)
-                loss.backward()
-                optimizer.step()
-        
-        # Evaluation
-        model.eval()
-        with torch.no_grad():
-            if name == 'DAP':
-                preds_s = model(torch.FloatTensor(X_test_s).to(device), torch.LongTensor(X_qual_test).to(device))
-            else:
-                preds_s = model(torch.FloatTensor(X_test_s).to(device))
-        
-        preds = scaler_y.inverse_transform(preds_s.cpu().numpy()).flatten()
         score = r2_score(y_test, preds)
-        model_scores[name] = score
-        model_results[name] = {'dates': test_dates, 'y_true': y_test, 'y_pred': preds}
-        print(f"{score:.4f}")
-
-    return model_scores, model_results
-
+        final_scores[name] = score
+        final_results[name] = {
+            "dates": X_test.index.tolist(),
+            "y_true": y_test.tolist(),
+            "y_pred": preds.tolist()
+        }
+        print(f"    - {name} R²: {score:.4f}")
+        
+    return final_scores, final_results
 
 class TLAFS_Algorithm:
     """
     Time-series Language-augmented Feature Search (T-LAFS) Algorithm.
     This class orchestrates the automated feature engineering process.
     """
-    def __init__(self, base_df, target_col, n_iterations=5, evaluation_model_name='DAP'):
+    def __init__(self, base_df, target_col, n_iterations=5, acceptance_threshold=0.01):
         self.base_df = base_df
         self.target_col = target_col
         self.n_iterations = n_iterations
-        self.evaluation_model_name = evaluation_model_name
+        self.acceptance_threshold = acceptance_threshold
         self.history = []
         self.best_score = -np.inf
         self.best_plan = []
-        self.best_df = self.base_df.copy()
-        self.feature_id_counter = 1
-        self.last_feature_importances = None
-        self.last_shap_contributions = None
-        self.available_operations = {
-            "trend": ["create_rolling_mean", "create_rolling_std", "create_ewm"],
-            "lag_and_diff": ["create_lag", "create_diff"],
-            "distribution": ["create_rolling_skew", "create_rolling_kurt"],
-            "calendar": ["create_time_features"],
-            "interaction": ["create_interaction"],
-            "cleanup": ["delete_feature"]
-        }
+        self.best_df = None
+        self.client = OpenAI()
+        
+        # --- NEW: Enrich base_df and prepare for pretraining ---
+        print("\nEnriching data with time features for a smarter autoencoder...")
+        self.base_df['dayofweek'] = self.base_df['date'].dt.dayofweek
+        self.base_df['month'] = self.base_df['date'].dt.month
+        self.base_df['weekofyear'] = self.base_df['date'].dt.isocalendar().week.astype(int)
+        self.base_df['is_weekend'] = (self.base_df['date'].dt.dayofweek >= 5).astype(int)
+        
+        TLAFS_Algorithm.pretrain_cols_static = [self.target_col, 'dayofweek', 'month', 'weekofyear', 'is_weekend']
+        df_for_pretraining = self.base_df[TLAFS_Algorithm.pretrain_cols_static]
+        print(f"Autoencoder will be trained on features: {TLAFS_Algorithm.pretrain_cols_static}")
 
+        print("\n🧠 Pre-training a context-aware feature embedding model...")
+        self.pretrained_encoder, self.embedder_scaler = pretrain_embedder(
+            df_for_pretraining,
+            window_size=90,
+            embedding_dim=16,
+            hidden_dim=64,
+            num_layers=2,
+            epochs=20
+        )
+        print("   ✅ Pre-training complete.")
+
+        # Add static variables for the static method to use
+        TLAFS_Algorithm.pretrained_encoder = self.pretrained_encoder
+        TLAFS_Algorithm.embedder_scaler = self.embedder_scaler
+        TLAFS_Algorithm.target_col_static = self.target_col
+        # TLAFS_Algorithm.pretrain_cols_static is already set
+
+    @staticmethod
+    def execute_plan(df: pd.DataFrame, plan: list):
+        """
+        Executes a feature engineering plan on a given dataframe.
+        This is the single, authoritative static method for all feature generation.
+        It contains all non-leaky feature generation logic.
+        """
+        temp_df = df.copy()
+        
+        embedder = TLAFS_Algorithm.pretrained_encoder
+        scaler = TLAFS_Algorithm.embedder_scaler
+        target_col = TLAFS_Algorithm.target_col_static
+        
+        for step in plan:
+            op = step.get("operation")
+            feature = step.get("feature")
+
+            # A more robust way to generate a new column name
+            def get_new_col_name(base_feature, id_suggestion):
+                if id_suggestion.startswith(base_feature):
+                    return id_suggestion
+                return f"{base_feature}_{id_suggestion}"
+
+            try:
+                # --- Basic Time-Series Features ---
+                if op == "create_lag":
+                    days = step.get("days", 1)
+                    id = step.get("id", f"lag{days}")
+                    new_col_name = get_new_col_name(feature, id)
+                    temp_df[new_col_name] = temp_df[feature].shift(days).bfill()
+
+                elif op == "create_diff":
+                    periods = step.get("periods", 1)
+                    id = step.get("id", f"diff{periods}")
+                    new_col_name = get_new_col_name(feature, id)
+                    temp_df[new_col_name] = temp_df[feature].diff(periods).shift(1).bfill()
+
+                elif op in ["create_rolling_mean", "create_rolling_std", "create_rolling_skew", "create_rolling_kurt", "create_rolling_min", "create_rolling_max"]:
+                    window = step.get("window", 7)
+                    op_name = op.split('_')[2]
+                    id = step.get("id", f"roll_{op_name}{window}")
+                    new_col_name = get_new_col_name(feature, id)
+                    roll_op = getattr(temp_df[feature].rolling(window=window), op_name)
+                    temp_df[new_col_name] = roll_op().shift(1).bfill()
+
+                elif op == "create_ewm":
+                    span = step.get("span", 7)
+                    id = step.get("id", f"ewm{span}")
+                    new_col_name = get_new_col_name(feature, id)
+                    temp_df[new_col_name] = temp_df[feature].ewm(span=span, adjust=False).mean().shift(1).bfill()
+
+                # --- Calendar and Seasonality Features ---
+                elif op == "create_time_features":
+                    if pd.api.types.is_datetime64_any_dtype(temp_df[feature]):
+                        default_parts = ["dayofweek", "month", "is_weekend"]
+                        for part in step.get("extract", default_parts):
+                            if part == "dayofweek": temp_df[f'{feature}_dayofweek'] = temp_df[feature].dt.dayofweek
+                            elif part == "month": temp_df[f'{feature}_month'] = temp_df[feature].dt.month
+                            elif part == "quarter": temp_df[f'{feature}_quarter'] = temp_df[feature].dt.quarter
+                            elif part == "is_weekend": temp_df[f'{feature}_is_weekend'] = (temp_df[feature].dt.dayofweek >= 5).astype(int)
+                            elif part == "dayofyear": temp_df[f'{feature}_dayofyear'] = temp_df[feature].dt.dayofyear
+                            elif part == "weekofyear": temp_df[f'{feature}_weekofyear'] = temp_df[feature].dt.isocalendar().week.astype(int)
+                    else:
+                        print(f"  - ⚠️ Warning: Skipped time_features on non-datetime column '{feature}'.")
+
+                elif op == "create_fourier_features":
+                    if pd.api.types.is_datetime64_any_dtype(temp_df[feature]):
+                        period = float(step["period"])
+                        order = int(step["order"])
+                        time_idx = (temp_df[feature] - temp_df[feature].min()).dt.days
+                        for k in range(1, order + 1):
+                            temp_df[f'fourier_sin_{k}_{int(period)}'] = np.sin(2 * np.pi * k * time_idx / period)
+                            temp_df[f'fourier_cos_{k}_{int(period)}'] = np.cos(2 * np.pi * k * time_idx / period)
+                    else:
+                        print(f"  - ⚠️ Warning: Skipped fourier on non-datetime column '{feature}'.")
+
+                # --- Learned & Interaction Features ---
+                elif op == "create_learned_embedding":
+                    if embedder and scaler:
+                        window, dim = embedder.seq_len, embedder.embedding_dim
+                        id = step.get("id", "embed")
+                        pretrain_cols = TLAFS_Algorithm.pretrain_cols_static
+                        
+                        print(f"  - Generating multi-variate embedding (win:{window}, dim:{dim}) from {len(pretrain_cols)} features...")
+                        
+                        df_for_embedding = temp_df[pretrain_cols]
+                        scaled_features = scaler.transform(df_for_embedding)
+                        
+                        sequences = np.array([scaled_features[i:i+window] for i in range(len(scaled_features) - window + 1)])
+                        
+                        if sequences.size == 0:
+                            print(f"  - ⚠️ Not enough data for embedding. Skipping.")
+                            continue
+                            
+                        tensor = torch.FloatTensor(sequences)
+                        with torch.no_grad():
+                            embeddings = embedder(tensor).numpy()
+                            
+                        valid_indices = temp_df.index[window-1:]
+                        cols = [f"embed_{i}_{id}" for i in range(dim)]
+                        embed_df = pd.DataFrame(embeddings, index=valid_indices, columns=cols)
+                        
+                        temp_df = temp_df.join(embed_df)
+                        temp_df[cols] = temp_df[cols].bfill()
+                    else:
+                        print(f"  - ⚠️ Embedder not available. Skipping.")
+
+                elif op == "create_interaction":
+                    features = step.get("features")
+                    if not features:
+                        f1 = step.get("feature1", step.get("feature_1"))
+                        f2 = step.get("feature2", step.get("feature_2"))
+                        if f1 and f2:
+                            features = [f1, f2]
+
+                    if isinstance(features, list) and len(features)==2 and all(f in temp_df.columns for f in features):
+                        id = step.get('id', 'new')
+                        new_col_name = f"{features[0]}_x_{features[1]}_{id}"
+                        temp_df[new_col_name] = temp_df[features[0]] * temp_df[features[1]]
+                    else:
+                        print(f"  - ⚠️ Skipping interaction for invalid/missing features: {features}")
+
+                elif op == "delete_feature":
+                    if feature in temp_df.columns and feature not in ['date', target_col]:
+                        temp_df.drop(columns=[feature], inplace=True)
+                        print(f"  - Successfully deleted feature: {feature}")
+                
+            except Exception as e:
+                import traceback
+                print(f"  - ❌ ERROR executing step {step}. Error: {e}\n{traceback.format_exc()}")
+        
+        return temp_df
+        
+    def get_plan_from_llm(self, context_prompt):
+        system_prompt = """You are an expert Data Scientist specializing in time-series forecasting. 
+Your task is to devise a feature engineering plan to improve a model's R^2 score.
+You will be given the current features, their importance, and a list of available operations.
+CRITICALLY, you will also receive a history of previously rejected plans. Learn from these past failures and avoid suggesting identical or very similar plans. 
+Your goal is to explore novel combinations, considering SHORT-TERM (e.g., lags), LONG-TERM (e.g., Fourier features for seasonality), and LEARNED REPRESENTATIONS from a pre-trained autoencoder.
+Your response MUST be a valid JSON object with a single key "plan", where the value is a list of dictionaries. Each dictionary represents one operation.
+The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
+Example for a complex plan: {"plan": [{"operation": "create_fourier_features", "feature": "date", "period": 365.25, "order": 2, "id": "F_Year"}, {"operation": "create_learned_embedding", "feature": "temp", "id": "LE_Month"}]}
+Note: For `create_learned_embedding`, the window size and embedding dimension are fixed by the pre-trained model. You only need to provide the source feature and an ID.
+Do not suggest features that already exist in the 'Available Features' list.
+Do not suggest deleting the last remaining feature.
+"""
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": context_prompt
+                    }
+                ],
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            plan_str = response.choices[0].message.content
+            plan = json.loads(plan_str)
+            return plan.get("plan", plan)
+        except Exception as e:
+            print(f"❌ Error calling LLM: {e}")
+            return [{"operation": "create_rolling_std", "feature": "temp", "window": 5, "id": "fallback_err"}]
 
     def run(self):
-        print(f"\n💡 Starting T-LAFS with new probe: {self.evaluation_model_name} ...\n")
+        print(f"\n💡 Starting T-LAFS with LightGBM Judge ...\n")
+        # `best_` variables track the peak performance found historically.
+        # `current_` variables track the current exploratory state, which can be reset.
         current_df = self.base_df.copy()
+        current_plan = []
         
-        # Add an initial feature to ensure the dataframe is not empty for tokenization
-        initial_plan = [{"operation": "create_lag", "feature": "temp", "days": 1, "id": "init"}]
-        current_df = execute_plan(current_df, initial_plan)
-        self.best_plan = initial_plan
+        # Start with a minimal feature set to force LLM creativity.
+        initial_plan = [
+            {"operation": "create_lag", "feature": "temp", "days": 1, "id": "lag1"},
+        ]
+        current_df = self.execute_plan(current_df, initial_plan)
+        current_plan = initial_plan
+        
+        # Establish a baseline score with the initial feature set.
+        print("\nEstablishing baseline score with initial feature set...")
+        try:
+            current_score, self.last_feature_importances, self.last_shap_contributions = evaluate_performance(
+                current_df, 
+                self.target_col
+            )
+            self.best_score = current_score
+            self.peak_score = current_score
+            self.best_df = current_df.copy()
+            self.best_plan = current_plan.copy()
+            print(f"  - Initial baseline score: {self.best_score:.4f}")
+        except Exception as e:
+            print(f"  - ❌ ERROR during initial evaluation: {e}")
+            return None, None, -1
 
         for i in range(self.n_iterations):
-            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Judge: {self.evaluation_model_name}) -----")
+            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Judge: LightGBM) -----")
             
-            baseline_score, importances, shap_contribs = evaluate_performance(current_df, self.target_col, model_name=self.evaluation_model_name)
-            
-            if importances is not None:
-                self.last_feature_importances = importances
-                print("  - Current Feature Importances:")
+            # Display the state *before* the LLM makes a new plan.
+            if self.last_feature_importances is not None and not self.last_feature_importances.empty:
+                print("  - Feature Importances (for this iteration's base):")
                 print(self.last_feature_importances.head(3).to_string())
-
-            if shap_contribs is not None:
-                self.last_shap_contributions = shap_contribs
-                print("  - Current SHAP Contributions (Directional Impact):")
+            if self.last_shap_contributions is not None and not self.last_shap_contributions.empty:
+                print("  - SHAP Contributions (for this iteration's base):")
                 print(self.last_shap_contributions.head(3).to_string())
 
-            if baseline_score > self.best_score:
-                self.best_score = baseline_score
-                self.best_df = current_df.copy()
-
-            print(f"  - Baseline score to beat: {self.best_score:.4f}")
+            print(f"  - Current score: {current_score:.4f} (Historical Best: {self.best_score:.4f})")
             
             print("\nStep 1: Strategist LLM is devising a new feature combo plan...")
             
+            rejected_plans = [item['plan'] for item in self.history if not item.get('adopted') and item.get('plan')]
+            rejected_plans = rejected_plans[-5:]
+            rejected_plans_str = json.dumps(rejected_plans, indent=2) if rejected_plans else "None so far."
+            
+            available_features = [c for c in current_df.columns if c != self.target_col and c != 'date']
+
             context_prompt = f"""
 Current State:
-- Best Score (R^2): {self.best_score:.4f}
-- Current Features: {list(self.best_df.columns)}
-- Feature Importances (lower is worse): 
+- Current Score (R^2): {current_score:.4f}
+- Historical Best Score (R^2): {self.best_score:.4f}
+- Available Features for Transformation: {available_features}
+- Feature Importances (higher is better): 
 {self.last_feature_importances.to_string() if self.last_feature_importances is not None else "Not available."}
-- SHAP Contribution (Feature-Prediction Correlation):
+- SHAP Contribution (Feature-Prediction Correlation, higher is better):
 {self.last_shap_contributions.to_string() if self.last_shap_contributions is not None else "Not available."}
+
+History of Rejected Plans:
+{rejected_plans_str}
 
 Task for Iteration {i+1}/{self.n_iterations}:
 """
-            # On certain iterations, the task is to prune. Otherwise, it's to add features.
             if (i + 1) > 2 and (i + 1) % 3 == 0:
-                context_prompt += "Your task is to PRUNE the feature set. Propose a `delete_feature` operation on the LEAST important feature if you believe it will improve the model by removing noise or redundancy. The feature to delete should ideally have very low importance."
+                context_prompt += "Your task is to PRUNE features. Propose a 'delete_feature' operation for a redundant or low-importance feature."
             else:
-                context_prompt += "Your task is to ADD new features. Propose a short list (1-2) of new feature engineering operations to improve the model. Focus on creating interactions or transformations that might capture non-linear patterns."
+                context_prompt += "Your task is to ADD new features. Propose a short list (1-2) of new, creative operations."
 
-            plan_extension = call_strategist_llm(context_prompt)
+            plan_extension = self.get_plan_from_llm(context_prompt)
             
-            # --- Normalize the plan from LLM ---
-            # The LLM may return a single dict instead of a list of dicts. Standardize it.
-            if isinstance(plan_extension, dict):
-                plan_extension = [plan_extension]
-
+            if not plan_extension:
+                self.history.append({"iteration": i + 1, "plan": [], "score": current_score, "adopted": False, "action": "noop"})
+                continue
+            
             print(f"✅ LLM Strategist proposed: {plan_extension}")
 
+            print(f"\nStep 2: Evaluating the new feature combo plan...")
+            df_with_new_features = self.execute_plan(current_df, plan_extension)
             
-            print("\nStep 2: Evaluating the new feature combo plan...")
-            # If deleting, apply to the current best_df. If adding, also apply to best_df.
-            temp_df_extended = execute_plan(self.best_df, plan_extension)
-            score, _, _ = evaluate_performance(temp_df_extended, self.target_col, model_name=self.evaluation_model_name)
-            print(f"  - Score with new feature combo: {score:.4f}")
+            new_score, new_importances, new_shaps = evaluate_performance(df_with_new_features, self.target_col)
+            
+            print(f"  - Score with new feature combo: {new_score:.4f}")
             
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
-            if score > self.best_score:
-                print(f"  -> SUCCESS! New score {score:.4f} > best score {self.best_score:.4f}.")
-                self.best_score = score
-                
-                # If it was an addition, append to the plan. If a deletion, remove from the plan.
-                is_deletion = plan_extension[0].get("operation") == "delete_feature"
-                if is_deletion:
-                    feature_to_delete_name = plan_extension[0].get("feature")
-                    # The ID is assumed to be the last part of the feature name
-                    try:
-                        deleted_id = feature_to_delete_name.split('_')[-1]
-                        self.best_plan = [p for p in self.best_plan if p.get('id') != deleted_id]
-                    except:
-                        print(f"  - ⚠️ Warning: Could not remove feature creation step for '{feature_to_delete_name}' from plan.")
-                else:
-                    self.best_plan += plan_extension
-
-                current_df, self.best_df = temp_df_extended.copy(), temp_df_extended.copy()
-            else:
-                print(f"  -> PLAN REJECTED. New score {score:.4f} <= best score {self.best_score:.4f}.")
+            is_adopted = new_score > (self.best_score - self.acceptance_threshold)
             
-            self.history.append({"iteration": i + 1, "plan": plan_extension, "score": score, "adopted": score > self.best_score})
+            if is_adopted:
+                current_df = df_with_new_features.copy()
+                current_score = new_score
+                self.last_feature_importances = new_importances
+                self.last_shap_contributions = new_shaps
+                
+                if plan_extension and plan_extension[0].get("operation") == "delete_feature":
+                    # logic to update plan on deletion
+                    pass 
+                elif plan_extension:
+                    current_plan += plan_extension
+                
+                if new_score > self.best_score:
+                    print(f"  -> SUCCESS! New peak score {new_score:.4f} > best score {self.best_score:.4f}.")
+                    self.best_score = new_score
+                    self.best_df = current_df.copy()
+                    self.best_plan = current_plan.copy()
+                else:
+                    print(f"  -> TOLERATED. Score {new_score:.4f} is within threshold. Accepting for exploration.")
+            else:
+                print(f"  -> PLAN REJECTED. Score {new_score:.4f} is too low. Reverting to best known state for next iteration.")
+                current_df = self.best_df.copy()
+                current_plan = self.best_plan.copy()
+                current_score = self.best_score
+            
+            self.history.append({"iteration": i + 1, "plan": plan_extension, "score": new_score, "adopted": is_adopted})
 
-        print("\n" + "="*80 + f"\n🏆 T-LAFS ({self.evaluation_model_name} Probe) Finished! 🏆")
+        print("\n" + "="*80 + f"\n🏆 T-LAFS (LightGBM Judge) Finished! 🏆")
         print(f"   - Best R² Score Achieved (during search): {self.best_score:.4f}")
         
         return self.best_df, self.best_plan, self.best_score
@@ -738,16 +756,12 @@ def main():
     # 实验配置
     N_ITERATIONS = 10
     TARGET_COL = 'temp'
-    TRAIN_TEST_SPLIT = 0.8
-    BATCH_SIZE = 32
-    N_EPOCHS = 50
-    LEARNING_RATE = 0.001
     
     # 数据配置
     # DATA_PATH = 'data/min_daily_temps.csv'  # 不再需要
     
     print("="*80)
-    print(f"🚀 T-LAFS Experiment: {PROBE_NAME.upper()} Probe")
+    print(f"🚀 T-LAFS Experiment: LightGBM Guided Search")
     print("="*80)
 
     # 初始化API客户端
@@ -760,8 +774,7 @@ def main():
     tlafs = TLAFS_Algorithm(
         base_df=base_df,
         target_col=TARGET_COL,
-        n_iterations=N_ITERATIONS,
-        evaluation_model_name=PROBE_NAME
+        n_iterations=N_ITERATIONS
     )
     best_df, best_feature_plan, best_score_during_search = tlafs.run()
 
@@ -773,7 +786,7 @@ def main():
         final_scores, final_results = evaluate_on_multiple_models(
             best_df,
             TARGET_COL,
-            tlafs.evaluation_model_name
+            'LGBM_Judge' # Hardcode the judge name for clarity
         )
 
         if final_scores:
@@ -782,9 +795,9 @@ def main():
             best_result = final_results[best_final_model_name]
 
             print("\n" + "="*60)
-            print(f"🏆 EXECUTIVE SUMMARY: T-LAFS '{PROBE_NAME.upper()}' PROBE STRATEGY 🏆")
+            print(f"🏆 EXECUTIVE SUMMARY: T-LAFS 'LGBM-JUDGE' STRATEGY 🏆")
             print("="*60)
-            print(f"Feature engineering search was conducted by: '{PROBE_NAME}' Probe")
+            print(f"Feature engineering search was conducted by: 'LightGBM Judge'")
             print(f"   - R² score during search phase: {best_score_during_search:.4f}")
             print(f"\nBest feature plan discovered:")
             print(json.dumps(best_feature_plan, indent=2, ensure_ascii=False))
@@ -802,15 +815,15 @@ def main():
                 y_true=best_result['y_true'],
                 y_pred=best_result['y_pred'],
                 best_model_name=best_final_model_name,
-                judge_model_name=PROBE_NAME,
+                judge_model_name='LGBM_Judge',
                 best_model_score=best_final_score
             )
             
             # --- 保存结果到JSON ---
             print("\n💾 Saving results to JSON...")
             results_to_save = {
-                "probe_model": PROBE_NAME,
-                "probe_config": PROBE_CONFIG,
+                "probe_model": "LGBM_Judge",
+                "probe_config": "N/A",
                 "best_score_during_search": best_score_during_search,
                 "best_feature_plan": best_feature_plan,
                 "final_features": [col for col in best_df.columns if col not in ['date', TARGET_COL]],
@@ -821,7 +834,7 @@ def main():
                 },
                 "run_history": tlafs.history
             }
-            save_results_to_json(results_to_save, PROBE_NAME)
+            save_results_to_json(results_to_save, "LGBM_Judge")
 
         else:
             print("\nCould not generate final validation scores.")
