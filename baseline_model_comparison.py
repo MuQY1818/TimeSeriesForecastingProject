@@ -14,11 +14,12 @@ import os
 # --- 1. Data Loading ---
 def get_raw_sales_data():
     """Loads only the sales column from the CSV."""
-    csv_path = 'data/total_cleaned.csv'
+    csv_path = 'data/min_daily_temps.csv'
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Data file not found: {csv_path}. Please run t_lafs_demo.py first if it's missing.")
     
-    df = pd.read_csv(csv_path, encoding='gbk', header=None, skiprows=1, names=['date', 'sales'])
+    df = pd.read_csv(csv_path)
+    df.rename(columns={'Date': 'date', 'Temp': 'sales'}, inplace=True) # Rename to be generic
     df['date'] = pd.to_datetime(df['date'])
     df.sort_values('date', inplace=True)
     return df[['date', 'sales']]
@@ -111,7 +112,7 @@ def main():
     print("="*80)
 
     # --- Configuration ---
-    SEQUENCE_LENGTH = 14
+    SEQUENCE_LENGTH = 7
     EPOCHS = 50
     BATCH_SIZE = 32
     LEARNING_RATE = 0.001

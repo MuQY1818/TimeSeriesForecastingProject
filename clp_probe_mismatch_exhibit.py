@@ -17,7 +17,6 @@ import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from datetime import datetime
-import random
 
 warnings.filterwarnings('ignore')
 
@@ -209,17 +208,12 @@ class MaskedTimeSeriesAutoencoder(nn.Module):
         reconstruction = self.decoder(latent_representation)
         return reconstruction
 
-def pretrain_embedder(df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFrame, window_size: int, config: dict, results_dir: str):
+def pretrain_embedder(df_pretrain: pd.DataFrame, window_size: int, config: dict, results_dir: str):
     """Pre-trains a masked autoencoder and returns the trained ENCODER part."""
-    input_dim = df_to_pretrain_on.shape[1]
+    input_dim = df_pretrain.shape[1]
     print(f"  - Preparing data for masked autoencoder pre-training (window: {window_size}, input_dim: {input_dim})...")
-    
-    # --- LEAKAGE FIX: Fit scaler ONLY on designated training data ---
     scaler = MinMaxScaler()
-    scaler.fit(df_to_scale_on)
-    
-    # Transform the entire dataset for the pre-training process
-    series_scaled = scaler.transform(df_to_pretrain_on)
+    series_scaled = scaler.fit_transform(df_pretrain)
     
     sequences = []
     for i in range(len(series_scaled) - window_size + 1):
@@ -330,30 +324,6 @@ def visualize_autoencoder_reconstruction(model, data_loader, scaler, results_dir
     print(f"✅ Autoencoder reconstruction plot saved to {plot_path}")
     plt.close(fig)
 
-# --- NEW: Self-Supervised Probe Model ---
-class DynamicProbeModel(nn.Module):
-    """
-    A GRU-based model for the self-supervised probe.
-    It learns to predict the next state of the feature set based on a window of past states.
-    """
-    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dim=1):
-        super().__init__()
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True
-        )
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, input_dim)
-        gru_out, _ = self.gru(x)
-        # We only care about the prediction for the NEXT step, so we take the last output
-        last_time_step_out = gru_out[:, -1, :]
-        prediction = self.fc(last_time_step_out)
-        return prediction
-
 # --- Feature Engineering & Evaluation (Adapted for DAP) ---
 def call_strategist_llm(context: str):
     """
@@ -372,17 +342,16 @@ def call_strategist_llm(context: str):
                 {
                     "role": "system",
                     "content": """You are an expert Data Scientist specializing in time-series forecasting. 
-Your task is to devise a feature engineering plan to improve the model's R^2 score. Your response MUST be a valid JSON object containing a single key, "plan".
-
-*** FEATURE ENGINEERING HIERARCHY & RULES ***
-1.  **PRIORITIZE EXOGENOUS AND LEARNED FEATURES:** Your primary focus should be creating features from independent sources (like 'dayofweek', 'month') and from the pre-trained learned embeddings ('embed_*'). These features help the model understand the underlying drivers of the time series.
-2.  **USE TARGET-DERIVED FEATURES SPARINGLY:** You may create rolling statistics (mean, std, etc.) or lags/diffs based on the target variable ('{self.target_col}'). However, use these ONLY to capture any remaining auto-correlation that the primary features missed. Do not rely on them as your main strategy. A good model should not solely depend on the recent history of the target.
-
+Your task is to devise a feature engineering plan to improve a model's R^2 score.
+You will be given the current features, their importance, and a list of available operations.
+CRITICALLY, you will also receive a history of previously rejected plans. Learn from these past failures and avoid suggesting identical or very similar plans. 
+Your goal is to explore novel combinations, considering SHORT-TERM (e.g., lags), LONG-TERM (e.g., Fourier features for seasonality), and LEARNED REPRESENTATIONS from a pre-trained autoencoder.
+Your response MUST be a valid JSON object containing a single key, "plan".
 The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
-Example for a multi-scale embedding plan: {{"plan": [{{"operation": "create_learned_embedding", "window": 365, "id": "LE_Yearly"}}, {{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}]}}
-Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [30, 90, 365]. This is a powerful way to capture patterns at different time scales.
-For `create_fourier_features`, the operation will always be applied to the 'date' column.
-Do not suggest features that already exist. Do not suggest deleting the last remaining feature.
+Example for a complex plan: {"plan": [{"operation": "create_fourier_features", "feature": "date", "period": 365.25, "order": 2, "id": "F_Year"}, {"operation": "create_learned_embedding", "feature": "temp", "id": "LE_Month"}]}
+Note: For `create_learned_embedding`, the window size and embedding dimension are fixed by the pre-trained model. You only need to provide the source feature and an ID.
+Do not suggest features that already exist in the 'Available Features' list.
+Do not suggest deleting the last remaining feature.
 """
                 },
                 {
@@ -432,98 +401,66 @@ def evaluate_performance(df: pd.DataFrame, target_col: str):
 
     return score, importances.sort_values(ascending=False), shap_contributions
 
-def probe_feature_set(df: pd.DataFrame, target_col: str, window_size=30, n_probes=1):
+def probe_feature_set(df: pd.DataFrame, target_col: str, n_probes=3):
     """
-    R²-based Downstream Task Probe.
-    Evaluates a feature set based on its ability to predict the *actual target variable*
-    in a time-series cross-validation setup. This avoids "probe overfitting" by
-    tying the score directly to the downstream task.
+    Multi-faceted Dynamic Feature Probe.
+    Evaluates a feature set based on performance, stability, and feature diversity across different model types.
     """
-    # 1. Prepare Data
-    df_feat = df.drop(columns=['date']).dropna()
-    # Align target with features after dropping NaNs
-    df_aligned = df.loc[df_feat.index]
+    df_feat = df.drop(columns=['date', target_col]).dropna()
+    y = df.loc[df_feat.index][target_col]
+    X = df_feat
+
+    if X.empty:
+        print("  - ⚠️ Probe Warning: Feature set is empty. Returning poor score.")
+        return {
+            "primary_score": -1.0, "score_stability": 999, "importance_diversity": 0,
+            "model_scores": {"lgbm": -1.0, "nn": -1.0},
+            "feature_importances": pd.Series(dtype=float)
+        }
+
+    scores_lgbm, scores_nn, importances_list = [], [], []
     
-    features_df = df_feat.drop(columns=[target_col])
-    target_df = df_aligned[[target_col]]
+    scaler = MinMaxScaler()
+    X_scaled = scaler.fit_transform(X)
+    y_scaled = scaler.fit_transform(y.values.reshape(-1, 1))
 
-    if features_df.empty:
-        return {"primary_score": 0.0, "r2_score": 0.0, "num_features": 0}
+    for seed in range(n_probes):
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42 + seed, shuffle=False)
+        X_train_s, X_test_s, y_train_s, y_test_s = train_test_split(X_scaled, y_scaled, test_size=0.2, random_state=42 + seed, shuffle=False)
 
-    # 2. Time-series split *before* any scaling to prevent data leakage
-    train_size = int(len(features_df) * 0.8)
-    features_train, features_val = features_df[:train_size], features_df[train_size:]
-    target_train, target_val = target_df[:train_size], target_df[train_size:]
+        # Probe 1: LightGBM (Tree-based)
+        lgbm = lgb.LGBMRegressor(random_state=42 + seed, n_estimators=100, verbosity=-1)
+        lgbm.fit(X_train, y_train)
+        scores_lgbm.append(r2_score(y_test, lgbm.predict(X_test)))
+        importances_list.append(lgbm.feature_importances_)
+        
+        # Probe 2: SimpleNN (Neural Network-based)
+        nn_model = SimpleNN(X.shape[1])
+        preds_scaled = train_pytorch_model(nn_model, X_train_s, y_train_s, X_test_s)
+        scores_nn.append(r2_score(y_test_s, preds_scaled))
 
-    if len(features_val) < window_size: # Not enough data for even one validation sequence
-        return {"primary_score": 0.0, "r2_score": 0.0, "num_features": features_df.shape[1]}
-
-    # 3. Fit scalers ONLY on training data
-    scaler_X = MinMaxScaler()
-    scaler_y = MinMaxScaler()
+    # --- Synthesize Probe Results ---
+    avg_lgbm_score = np.mean(scores_lgbm)
+    avg_nn_score = np.mean(scores_nn)
     
-    features_train_scaled = scaler_X.fit_transform(features_train)
-    target_train_scaled = scaler_y.fit_transform(target_train)
-
-    # 4. Apply the same scalers to validation data
-    features_val_scaled = scaler_X.transform(features_val)
-    target_val_scaled = scaler_y.transform(target_val)
-
-    # 5. Create sequences from scaled data
-    def create_sequences(features, target, window_size):
-        X, y = [], []
-        # Ensure we have enough data to form at least one sequence.
-        if len(features) > window_size:
-            for i in range(len(features) - window_size):
-                X.append(features[i:i+window_size])
-                y.append(target[i+window_size])
-        return np.array(X), np.array(y)
-
-    X_train, y_train = create_sequences(features_train_scaled, target_train_scaled, window_size)
-    X_val, y_val = create_sequences(features_val_scaled, target_val_scaled, window_size)
-
-    if X_val.size == 0 or y_val.size == 0:
-         return {"primary_score": 0.0, "r2_score": 0.0, "num_features": features_df.shape[1]}
-
-    X_train, y_train = torch.FloatTensor(X_train), torch.FloatTensor(y_train)
-    X_val, y_val = torch.FloatTensor(X_val), torch.FloatTensor(y_val)
+    # Primary score is a blend of different model structures
+    primary_score = (avg_lgbm_score + avg_nn_score) / 2
     
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    # Stability: Lower is better. How volatile is the score with different data slices?
+    score_stability = np.std(scores_lgbm)
     
-    # 6. Train the Probe Model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_dim = X_train.shape[2]
-    model = DynamicProbeModel(input_dim=input_dim, output_dim=1).to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    model.train()
-    for epoch in range(20):
-        for inputs, targets in train_loader:
-            optimizer.zero_grad()
-            outputs = model(inputs.to(device))
-            loss = criterion(outputs, targets.to(device))
-            loss.backward()
-            optimizer.step()
-
-    # 7. Evaluate and return R² score
-    model.eval()
-    with torch.no_grad():
-        val_preds_scaled = model(X_val.to(device)).cpu().numpy()
-    
-    # We must use the original unscaled validation target for r2_score
-    y_val_orig = target_val.values[window_size:]
-    val_preds_orig = scaler_y.inverse_transform(val_preds_scaled)
-
-    score = r2_score(y_val_orig, val_preds_orig)
-    
-    primary_score = max(0.0, score)
+    # Importance Diversity (Gini Impurity): Higher is better. Are features working as a team?
+    # 0 = one feature dominates; ~1 = all features contribute equally.
+    avg_importances = np.mean(importances_list, axis=0)
+    norm_importances = avg_importances / (np.sum(avg_importances) + 1e-9)
+    importance_diversity = 1 - np.sum(np.power(norm_importances, 2))
 
     return {
         "primary_score": primary_score,
-        "r2_score": score,
-        "num_features": X_train.shape[2]
+        "score_stability": score_stability,
+        "importance_diversity": importance_diversity,
+        "model_scores": {"lgbm": avg_lgbm_score, "nn": avg_nn_score},
+        "feature_importances": pd.Series(avg_importances, index=X.columns).sort_values(ascending=False)
     }
 
 def visualize_final_predictions(dates, y_true, y_pred, best_model_name, probe_name, best_model_metrics, results_dir):
@@ -625,72 +562,10 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
         
     return final_metrics, final_results
 
-class ExperienceReplayBuffer:
-    """A buffer to store and sample past experiences for the LLM agent."""
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.buffer = []
-        self.position = 0
-
-    def push(self, state, action, reward, adopted):
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(None)
-        experience = {
-            "state": state, 
-            "action": action, 
-            "reward": reward,
-            "adopted": adopted
-        }
-        self.buffer[self.position] = experience
-        self.position = (self.position + 1) % self.capacity
-
-    def sample(self, n_good=2, n_bad=1):
-        if len(self.buffer) < 2: # Don't sample if buffer is too small
-            return ""
-            
-        good_experiences = [exp for exp in self.buffer if exp['adopted']]
-        bad_experiences = [exp for exp in self.buffer if not exp['adopted']]
-
-        good_experiences.sort(key=lambda x: x.get('reward', 0), reverse=True)
-
-        good_samples = random.sample(good_experiences, min(len(good_experiences), n_good))
-        bad_samples = random.sample(bad_experiences, min(len(bad_experiences), n_bad))
-        
-        if not good_samples and not bad_samples:
-            return ""
-
-        prompt_str = "\n\n--- IN-CONTEXT LEARNING: EXAMPLES FROM PAST ATTEMPTS ---\n"
-        prompt_str += "Learn from these past successes and failures to make a better plan.\n"
-
-        if good_samples:
-            prompt_str += "\n**Successful Plans (Adopted with High Reward):**\n"
-            for i, exp in enumerate(good_samples):
-                prompt_str += f"Example {i+1}:\n"
-                r2 = exp['state'].get('R2 Score (raw)', -1.0)
-                num_feats = exp['state'].get('Number of Features', 'N/A')
-                prompt_str += f" - Context: R² score was {r2:.4f} with {num_feats} features: {exp['state']['Available Features']}.\n"
-                prompt_str += f" - Proposed Plan: {exp['action']}\n"
-                prompt_str += f" - Outcome: Plan was ADOPTED, leading to a reward of {exp['reward']:.4f}.\n"
-        
-        if bad_samples:
-            prompt_str += "\n**Failed Plans (Rejected):**\n"
-            for i, exp in enumerate(bad_samples):
-                prompt_str += f"Example {i+1}:\n"
-                r2 = exp['state'].get('R2 Score (raw)', -1.0)
-                num_feats = exp['state'].get('Number of Features', 'N/A')
-                prompt_str += f" - Context: R² score was {r2:.4f} with {num_feats} features: {exp['state']['Available Features']}.\n"
-                prompt_str += f" - Proposed Plan: {exp['action']}\n"
-                prompt_str += f" - Outcome: Plan was REJECTED.\n"
-            
-        return prompt_str
-
-    def __len__(self):
-        return len(self.buffer)
-
 class TLAFS_Algorithm:
     """
     Time-series Language-augmented Feature Search (T-LAFS) Algorithm.
-    This class orchestrates the automated feature engineering process, now framed as an RL problem.
+    This class orchestrates the automated feature engineering process.
     """
     def __init__(self, base_df, target_col, n_iterations=5, acceptance_threshold=0.01, results_dir="."):
         self.base_df = base_df
@@ -703,9 +578,8 @@ class TLAFS_Algorithm:
         self.best_df = None
         self.client = OpenAI()
         self.results_dir = results_dir
-        self.experience_buffer = ExperienceReplayBuffer(capacity=20)
         
-        # --- NEW: Multi-scale Embeddings Pre-training ---
+        # --- NEW: Enrich base_df and prepare for pretraining ---
         print("\nEnriching data with time features for a smarter autoencoder...")
         self.base_df['dayofweek'] = self.base_df['date'].dt.dayofweek
         self.base_df['month'] = self.base_df['date'].dt.month
@@ -716,41 +590,28 @@ class TLAFS_Algorithm:
         df_for_pretraining = self.base_df[TLAFS_Algorithm.pretrain_cols_static]
         print(f"Autoencoder will be trained on features: {TLAFS_Algorithm.pretrain_cols_static}")
 
-        # --- LEAKAGE FIX: Define a strict training set for fitting scalers ---
-        train_size = int(len(df_for_pretraining) * 0.8)
-        df_for_scaling = df_for_pretraining.iloc[:train_size]
-        print(f"Scalers for embeddings will be fit on the first {train_size} rows to prevent data leakage.")
-
-        print("\n🧠 Pre-training MULTI-SCALE Masked Autoencoders to generate features...")
+        print("\n🧠 Pre-training a Masked Autoencoder to generate features...")
         
-        self.pretrained_encoders = {}
-        self.embedder_scalers = {}
-        embedding_window_sizes = [30, 90, 365] # e.g., monthly, quarterly, yearly patterns
+        pretrain_config = {
+            'encoder_hidden_dim': 128, 'encoder_layers': 4,
+            'decoder_hidden_dim': 64, 'decoder_layers': 1,
+            'epochs': 100, 'batch_size': 64,
+            'learning_rate': 0.001, 'mask_ratio': 0.4
+        }
 
-        for window_size in embedding_window_sizes:
-            print(f"\n--- Training for window size: {window_size} days ---")
-            pretrain_config = {
-                'encoder_hidden_dim': 128, 'encoder_layers': 4,
-                'decoder_hidden_dim': 64, 'decoder_layers': 1,
-                'epochs': 100, 'batch_size': 64,
-                'learning_rate': 0.001, 'mask_ratio': 0.4
-            }
-
-            encoder, scaler = pretrain_embedder(
-                df_for_pretraining,       # The AE can learn patterns from all data
-                df_for_scaling,           # But the scaler is ONLY fit on the training portion
-                window_size=window_size,
-                config=pretrain_config,
-                results_dir=self.results_dir
-            )
-            self.pretrained_encoders[window_size] = encoder
-            self.embedder_scalers[window_size] = scaler
-            print(f"   ✅ Pre-training complete for window {window_size}.")
+        self.pretrained_encoder, self.embedder_scaler = pretrain_embedder(
+            df_for_pretraining,
+            window_size=90,
+            config=pretrain_config,
+            results_dir=self.results_dir
+        )
+        print("   ✅ Pre-training complete.")
         
-        # Add static dictionaries for the static method to use
-        TLAFS_Algorithm.pretrained_encoders = self.pretrained_encoders
-        TLAFS_Algorithm.embedder_scalers = self.embedder_scalers
+        # Add static variables for the static method to use
+        TLAFS_Algorithm.pretrained_encoder = self.pretrained_encoder
+        TLAFS_Algorithm.embedder_scaler = self.embedder_scaler
         TLAFS_Algorithm.target_col_static = self.target_col
+        # TLAFS_Algorithm.pretrain_cols_static is already set
 
     @staticmethod
     def execute_plan(df: pd.DataFrame, plan: list):
@@ -761,12 +622,13 @@ class TLAFS_Algorithm:
         """
         temp_df = df.copy()
         
+        embedder = TLAFS_Algorithm.pretrained_encoder
+        scaler = TLAFS_Algorithm.embedder_scaler
         target_col = TLAFS_Algorithm.target_col_static
         
         for step in plan:
             op = step.get("operation")
-            # BUG FIX: Handle 'feature', 'base_feature', 'column', or 'target' to align with LLM.
-            feature = step.get("feature") or step.get("base_feature") or step.get("column") or step.get("target")
+            feature = step.get("feature") or step.get("base_feature") or step.get("column")
 
             # A more robust way to generate a new column name
             def get_new_col_name(base_feature, id_suggestion):
@@ -780,13 +642,13 @@ class TLAFS_Algorithm:
                     days = step.get("days", 1)
                     id = step.get("id", f"lag{days}")
                     new_col_name = get_new_col_name(feature, id)
-                    temp_df[new_col_name] = temp_df[feature].shift(days).ffill().fillna(0)
+                    temp_df[new_col_name] = temp_df[feature].shift(days).bfill()
 
                 elif op == "create_diff":
                     periods = step.get("periods", 1)
                     id = step.get("id", f"diff{periods}")
                     new_col_name = get_new_col_name(feature, id)
-                    temp_df[new_col_name] = temp_df[feature].diff(periods).shift(1).ffill().fillna(0)
+                    temp_df[new_col_name] = temp_df[feature].diff(periods).shift(1).bfill()
 
                 elif op in ["create_rolling_mean", "create_rolling_std", "create_rolling_skew", "create_rolling_kurt", "create_rolling_min", "create_rolling_max"]:
                     window = step.get("window", 7)
@@ -794,13 +656,13 @@ class TLAFS_Algorithm:
                     id = step.get("id", f"roll_{op_name}{window}")
                     new_col_name = get_new_col_name(feature, id)
                     roll_op = getattr(temp_df[feature].rolling(window=window), op_name)
-                    temp_df[new_col_name] = roll_op().shift(1).ffill().fillna(0)
+                    temp_df[new_col_name] = roll_op().shift(1).bfill()
 
                 elif op == "create_ewm":
                     span = step.get("span", 7)
                     id = step.get("id", f"ewm{span}")
                     new_col_name = get_new_col_name(feature, id)
-                    temp_df[new_col_name] = temp_df[feature].ewm(span=span, adjust=False).mean().shift(1).ffill().fillna(0)
+                    temp_df[new_col_name] = temp_df[feature].ewm(span=span, adjust=False).mean().shift(1).bfill()
 
                 # --- Calendar and Seasonality Features ---
                 elif op == "create_time_features":
@@ -831,14 +693,10 @@ class TLAFS_Algorithm:
 
                 # --- Learned & Interaction Features ---
                 elif op == "create_learned_embedding":
-                    # --- NEW: Multi-scale embedding logic ---
-                    window = step.get("window", 90) # Default to 90 if not specified
-                    embedder = TLAFS_Algorithm.pretrained_encoders.get(window)
-                    scaler = TLAFS_Algorithm.embedder_scalers.get(window)
-
                     if embedder and scaler:
-                        id = step.get("id", f"embed{window}")
+                        id = step.get("id", "embed")
                         pretrain_cols = TLAFS_Algorithm.pretrain_cols_static
+                        window = 90 # Hardcoded for now, should match pretraining
                         
                         print(f"  - Generating multi-variate embedding (win:{window}) from {len(pretrain_cols)} features...")
                         
@@ -848,7 +706,7 @@ class TLAFS_Algorithm:
                         sequences = np.array([scaled_features[i:i+window] for i in range(len(scaled_features) - window + 1)])
                         
                         if sequences.size == 0:
-                            print(f"  - ⚠️ Not enough data for embedding with window {window}. Skipping.")
+                            print(f"  - ⚠️ Not enough data for embedding. Skipping.")
                             continue
                             
                         tensor = torch.FloatTensor(sequences)
@@ -868,16 +726,10 @@ class TLAFS_Algorithm:
                         cols = [f"embed_{i}_{id}" for i in range(embeddings.shape[1])]
                         embed_df = pd.DataFrame(embeddings, index=valid_indices, columns=cols)
                         
-                        # BUG FIX: Drop existing columns with the same names before joining to prevent overlap errors.
-                        # This allows the LLM to "update" an embedding feature.
-                        existing_cols_to_drop = [col for col in cols if col in temp_df.columns]
-                        if existing_cols_to_drop:
-                            temp_df.drop(columns=existing_cols_to_drop, inplace=True)
-
                         temp_df = temp_df.join(embed_df)
-                        temp_df[cols] = temp_df[cols].ffill().fillna(0)
+                        temp_df[cols] = temp_df[cols].bfill()
                     else:
-                        print(f"  - ⚠️ Embedder for window {window} not available. Skipping.")
+                        print(f"  - ⚠️ Embedder not available. Skipping.")
 
                 elif op == "create_interaction":
                     features = step.get("features")
@@ -906,17 +758,16 @@ class TLAFS_Algorithm:
         return temp_df
         
     def get_plan_from_llm(self, context_prompt):
-        system_prompt = f"""You are an expert Data Scientist acting as a Reinforcement Learning agent. Your goal is to devise a feature engineering plan (your 'action') to maximize the future 'reward' (improvement in R^2 score).
-You will be given the current 'state' of the system (current features, scores) and a memory of past experiences.
-Your response MUST be a valid JSON object containing a single key, "plan".
+        system_prompt = f"""You are an expert Data Scientist building a robust, generalizable time-series forecasting model. Your task is to devise a feature engineering plan to improve the model's R^2 score.
 
 *** FEATURE ENGINEERING HIERARCHY & RULES ***
 1.  **PRIORITIZE EXOGENOUS AND LEARNED FEATURES:** Your primary focus should be creating features from independent sources (like 'dayofweek', 'month') and from the pre-trained learned embeddings ('embed_*'). These features help the model understand the underlying drivers of the time series.
 2.  **USE TARGET-DERIVED FEATURES SPARINGLY:** You may create rolling statistics (mean, std, etc.) or lags/diffs based on the target variable ('{self.target_col}'). However, use these ONLY to capture any remaining auto-correlation that the primary features missed. Do not rely on them as your main strategy. A good model should not solely depend on the recent history of the target.
+3.  **STRICTLY FORBIDDEN (DATA LEAKAGE):** You are strictly forbidden from creating features that cause data leakage. The most common mistake is using the target variable ('{self.target_col}') in an un-shifted operation, such as 'create_interaction'. The system will automatically shift time-based features like lags and rolling stats, but operations like 'create_interaction' on the target are unsafe and thus banned.
 
 The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
-Example for a multi-scale embedding plan: {{"plan": [{{"operation": "create_learned_embedding", "window": 365, "id": "LE_Yearly"}}, {{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}]}}
-Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [30, 90, 365]. This is a powerful way to capture patterns at different time scales.
+Example for a complex plan: {{"plan": [{{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}, {{"operation": "create_learned_embedding", "id": "LE_Month"}}]}}
+Note: For `create_learned_embedding`, you only need to provide an ID. The system handles the rest.
 For `create_fourier_features`, the operation will always be applied to the 'date' column.
 Do not suggest features that already exist. Do not suggest deleting the last remaining feature.
 """
@@ -944,38 +795,8 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             # Fallback plan updated to not use the target variable directly for rolling stats
             return [{"operation": "create_rolling_std", "feature": "month", "window": 3, "id": "fallback_err"}]
 
-    def build_llm_context(self, probe_results, iteration_num):
-        """Builds the main context dictionary for the LLM prompt."""
-        # Note: This probe doesn't generate traditional feature importances.
-        # We can pass the list of features being evaluated instead.
-        available_features = list(self.best_df.drop(columns=['date', self.target_col]).columns)
-        
-        context = {
-            "Iteration": f"{iteration_num + 1}/{self.n_iterations}",
-            "Current Predictability Score": probe_results['primary_score'],
-            "Historical Best Score": self.best_score,
-            "R2 Score (raw)": probe_results.get('r2_score', 0.0),
-            "Number of Features": probe_results.get('num_features', len(available_features)),
-            "Available Features": available_features,
-        }
-        return context
-
-    def format_prompt_for_llm(self, context_dict, in_context_examples_str):
-        """Formats the context dictionary and examples into a string for the LLM."""
-        prompt = "--- CURRENT STATE & TASK ---\n"
-        prompt += "The 'Predictability Score' measures how well a feature set can predict its own future. A higher score means the features are more informative and structured. Your goal is to maximize this score.\n"
-        for key, value in context_dict.items():
-            if isinstance(value, (float, np.floating)):
-                 prompt += f"- {key}: {value:.4f}\n"
-            else:
-                prompt += f"- {key}: {value}\n"
-        
-        prompt += "\nAnalyze the current state and the historical examples. Propose a short, creative list of 1-2 operations to improve the predictability score."
-        prompt += in_context_examples_str
-        return prompt
-
     def run(self):
-        print(f"\n💡 Starting T-LAFS with R² Downstream Probe (RL Framework) ...\n")
+        print(f"\n💡 Starting T-LAFS with Multi-faceted Dynamic Probe ...\n")
         current_df = self.base_df.copy()
         current_plan = []
         
@@ -995,24 +816,49 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             self.best_score = current_score
             self.best_df = current_df.copy()
             self.best_plan = current_plan.copy()
-            print(f"  - Initial baseline score (R²): {self.best_score:.4f} | Features: {probe_results.get('num_features', -1)}")
+            print(f"  - Initial baseline score (primary_score): {self.best_score:.4f}")
+            print(f"  - Model Blend: (LGBM: {probe_results['model_scores']['lgbm']:.3f}, NN: {probe_results['model_scores']['nn']:.3f})")
         except Exception as e:
             import traceback
             print(f"  - ❌ ERROR during initial evaluation: {e}\n{traceback.format_exc()}")
             return None, None, -1
 
         for i in range(self.n_iterations):
-            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: R² Downstream Task) -----")
+            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: Dynamic) -----")
             
             last_results = self.last_probe_results
-            print(f"  - Current Score (R²): {last_results['primary_score']:.4f} | #Feats: {last_results.get('num_features', -1)} | Best Score: {self.best_score:.4f}")
+            print(f"  - Current Score: {last_results['primary_score']:.4f} (LGBM: {last_results['model_scores']['lgbm']:.3f}, NN: {last_results['model_scores']['nn']:.3f})")
+            print(f"  - Stability (std): {last_results['score_stability']:.4f} | Diversity (gini): {last_results['importance_diversity']:.4f} | Historical Best: {self.best_score:.4f}")
 
             print("\nStep 1: Strategist LLM is devising a new feature combo plan...")
             
-            current_state_context = self.build_llm_context(last_results, i)
-            in_context_examples = self.experience_buffer.sample(n_good=2, n_bad=1)
-            full_prompt = self.format_prompt_for_llm(current_state_context, in_context_examples)
-            plan_extension = self.get_plan_from_llm(full_prompt)
+            rejected_plans = [item['plan'] for item in self.history if not item.get('adopted') and item.get('plan')]
+            rejected_plans_str = json.dumps(rejected_plans[-5:], indent=2) if rejected_plans else "None so far."
+            
+            # Show only base features to the LLM to guide it
+            base_features = [c for c in self.base_df.columns if c != 'date']
+            available_features = [c for c in current_df.columns if c != self.target_col and c != 'date']
+            
+            feature_importances_str = last_results['feature_importances'].head(10).to_string() if 'feature_importances' in last_results and last_results['feature_importances'] is not None else "Not available."
+
+            context_prompt = f"""
+Current State & Probe Analysis:
+- Primary Score (R^2 Blend): {last_results['primary_score']:.4f} (Historical Best: {self.best_score:.4f})
+- Individual Model Scores: LGBM R^2: {last_results['model_scores']['lgbm']:.4f}, SimpleNN R^2: {last_results['model_scores']['nn']:.4f}
+- Score Stability (std dev across runs, lower is better): {last_results['score_stability']:.4f}
+- Feature Diversity (Gini, higher is better): {last_results['importance_diversity']:.4f}
+- Available Features: {available_features}
+- Recommended Base Features for Transformation: {base_features}
+- Top 10 Feature Importances (from LightGBM): 
+{feature_importances_str}
+
+History of Recently Rejected Plans:
+{rejected_plans_str}
+
+Task for Iteration {i+1}/{self.n_iterations}:
+Analyze the probe's feedback. If diversity is low, suggest interactions or new feature types. If stability is poor, maybe simplify or remove features. If a model type is lagging, suggest features that might help it. Propose a short, creative list (1-2) of operations based on the 'Recommended Base Features'.
+"""
+            plan_extension = self.get_plan_from_llm(context_prompt)
             
             if not plan_extension:
                 self.history.append({"iteration": i + 1, "plan": [], "score": current_score, "adopted": False, "action": "noop"})
@@ -1026,13 +872,10 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             new_probe_results = probe_feature_set(df_with_new_features, self.target_col)
             new_score = new_probe_results["primary_score"]
 
-            print(f"  - Probe results: Score (R²)={new_score:.4f}, #Feats: {new_probe_results.get('num_features', -1)}")
+            print(f"  - Probe results: Score={new_score:.4f}, Stability={new_probe_results['score_stability']:.4f}, Diversity={new_probe_results['importance_diversity']:.4f}")
             
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
-            is_adopted = new_score > (self.best_score - 0.01) # Use a slightly larger tolerance for R²
-            
-            reward = new_score - current_score
-            self.experience_buffer.push(current_state_context, plan_extension, reward, is_adopted)
+            is_adopted = new_score > (self.best_score - self.acceptance_threshold)
             
             if is_adopted:
                 current_df = df_with_new_features.copy()
@@ -1051,10 +894,12 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
                     print(f"  -> TOLERATED. Score {new_score:.4f} is within threshold. Accepting for exploration.")
             else:
                 print(f"  -> PLAN REJECTED. Score {new_score:.4f} is too low. Reverting to best known state for next iteration.")
+                # On rejection, we revert the state, so current_df and current_plan are already the best ones.
+                # We don't need to do anything to the variables, just not update them.
             
-            self.history.append({"iteration": i + 1, "plan": plan_extension, "probe_results": new_probe_results, "adopted": is_adopted, "reward": reward})
+            self.history.append({"iteration": i + 1, "plan": plan_extension, "probe_results": new_probe_results, "adopted": is_adopted})
 
-        print("\n" + "="*80 + f"\n🏆 T-LAFS (R² Downstream Probe) Finished! 🏆")
+        print("\n" + "="*80 + f"\n🏆 T-LAFS (Dynamic Probe) Finished! 🏆")
         print(f"   - Best Primary Score Achieved (during search): {self.best_score:.4f}")
         
         return self.best_df, self.best_plan, self.best_score

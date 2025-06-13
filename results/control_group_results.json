@@ -38,12 +38,12 @@
         "LightGBM": 0.7002117020704373,
         "RandomForest": 0.7241761803243179,
         "XGBoost": 0.6448641384753768,
-        "SimpleNN": 0.7186454831194709,
-        "EnhancedNN": 0.7215541433595408,
-        "Transformer": 0.7249173220490045
+        "SimpleNN": 0.7033810715834687,
+        "EnhancedNN": 0.7219116479303975,
+        "Transformer": 0.7135902077891311
     },
     "best_final_model": {
-        "name": "Transformer",
-        "score": 0.7249173220490045
+        "name": "RandomForest",
+        "score": 0.7241761803243179
     }
 }
