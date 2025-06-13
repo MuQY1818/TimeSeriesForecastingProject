@@ -1,0 +1,267 @@
+{
+    "probe_model": "quantum_dual_stream",
+    "probe_config": {
+        "quant_input_size": null,
+        "vocab_size": 5,
+        "qual_embed_dim": 16,
+        "quant_embed_dim": 48
+    },
+    "best_score_during_search": 0.9801327235335174,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "init"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "temp",
+                "temp_init"
+            ],
+            "id": "I1A"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "feature": "temp",
+            "window": 7,
+            "id": "T1A"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "temp",
+                "temp_init"
+            ],
+            "id": "I2B"
+        },
+        {
+            "operation": "create_ewm",
+            "feature": "temp",
+            "span": 5,
+            "id": "E1C"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "temp",
+                "temp_init"
+            ],
+            "id": "I3D"
+        },
+        {
+            "operation": "create_ewm",
+            "feature": "temp",
+            "span": 5,
+            "id": "E2F"
+        }
+    ],
+    "final_features": [
+        "temp_init",
+        "temp_x_temp_init_I1A",
+        "temp_T1A",
+        "temp_x_temp_init_I2B",
+        "temp_E1C",
+        "temp_x_temp_init_I3D",
+        "temp_E2F"
+    ],
+    "final_validation_scores": {
+        "LightGBM": 0.8093667653997155,
+        "RandomForest": 0.8320800732638458,
+        "XGBoost": 0.8966197699018522,
+        "SimpleNN": 0.9542608686412504,
+        "EnhancedNN (LSTM+Attn)": 0.9100721779519002,
+        "Transformer": 0.9007686292439561,
+        "DAP": 0.9733399563214391
+    },
+    "best_final_model": {
+        "name": "DAP",
+        "score": 0.9733399563214391
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
+                    "id": "I1A"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 7,
+                    "id": "T1A"
+                }
+            ],
+            "score": 0.9293682563658434,
+            "adopted": false
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
+                    "id": "I2A"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 5,
+                    "id": "T2A"
+                }
+            ],
+            "score": 0.9020089397605805,
+            "adopted": false
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "delete_feature",
+                    "feature": "temp_init",
+                    "id": "D3A"
+                }
+            ],
+            "score": 0.7923335704631371,
+            "adopted": false
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
+                    "id": "I2B"
+                },
+                {
+                    "operation": "create_rolling_kurt",
+                    "feature": "temp",
+                    "window": 5,
+                    "id": "K1A"
+                }
+            ],
+            "score": 0.9156972032586308,
+            "adopted": false
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
+                    "id": "I2B"
+                },
+                {
+                    "operation": "create_ewm",
+                    "feature": "temp",
+                    "span": 5,
+                    "id": "E1C"
+                }
+            ],
+            "score": 0.9446789063504347,
+            "adopted": false
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "delete_feature",
+                    "feature": "temp_init",
+                    "id": "DF1"
+                }
+            ],
+            "score": 0.8943468221422711,
+            "adopted": false
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
+                    "id": "I3D"
+                },
+                {
+                    "operation": "create_rolling_kurt",
+                    "feature": "temp",
+                    "window": 7,
+                    "id": "RK1E"
+                }
+            ],
+            "score": 0.9406950545243274,
+            "adopted": false
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_rolling_mean",
+                    "feature": "temp_init",
+                    "window": 7,
+                    "id": "R1A"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_T1A"
+                    ],
+                    "id": "I3C"
+                }
+            ],
+            "score": 0.973951819859766,
+            "adopted": false
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "delete_feature",
+                    "feature": "temp_x_temp_init_I1A",
+                    "id": "D1A"
+                }
+            ],
+            "score": 0.9028121787699631,
+            "adopted": false
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
+                    "id": "I3D"
+                },
+                {
+                    "operation": "create_ewm",
+                    "feature": "temp",
+                    "span": 5,
+                    "id": "E2F"
+                }
+            ],
+            "score": 0.9801327235335174,
+            "adopted": false
+        }
+    ]
+}

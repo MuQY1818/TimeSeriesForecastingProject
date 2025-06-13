@@ -16,6 +16,7 @@ import joblib
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
+from probes import ProbeFactory, DualStreamAttentionProbe
 
 warnings.filterwarnings('ignore')
 
@@ -36,16 +37,19 @@ def setup_api_client():
         exit()
 
 # --- Data Handling & DAP Specifics ---
-def get_time_series_data():
-    """Loads the base temperature data."""
-    csv_path = 'data/min_daily_temps.csv'
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Data file not found: {csv_path}. Please ensure it is in the 'data' directory.")
-    df = pd.read_csv(csv_path)
-    df.rename(columns={'Date': 'date', 'Temp': 'temp'}, inplace=True)
+def get_time_series_data(dataset_type='min_daily_temps'):
+    if dataset_type == 'min_daily_temps':
+        csv_path = 'data/min_daily_temps.csv'
+        df = pd.read_csv(csv_path)
+        df.rename(columns={'Date': 'date', 'Temp': 'temp'}, inplace=True)
+    elif dataset_type == 'total_cleaned':
+        csv_path = 'data/total_cleaned.csv'
+        df = pd.read_csv(csv_path)
+        df.rename(columns={'日期': 'date', '成交商品件数': 'temp'}, inplace=True)
+    else:
+        raise ValueError('Unknown dataset type')
     df['date'] = pd.to_datetime(df['date'])
     df.sort_values('date', inplace=True)
-    # The 'store_id' and 'product_category' columns are not relevant for this dataset.
     return df
 
 def qualitative_tokenizer(series: pd.Series):
@@ -115,39 +119,6 @@ class TransformerModel(nn.Module):
         x = self.transformer_encoder(x)
         x = self.output_layer(x.squeeze(1))
         return x
-
-# The NEW Probe Model: Dual-stream Attention Probe (DAP)
-class DualStreamAttentionProbe(nn.Module):
-    def __init__(self, quant_input_size, vocab_size, qual_embed_dim=16, d_model=64, nhead=4, num_layers=2):
-        super().__init__()
-        # 1. Two-Stream Input Embedding
-        self.quant_embed = nn.Linear(quant_input_size, d_model - qual_embed_dim)
-        self.qual_embed = nn.Embedding(vocab_size, qual_embed_dim)
-        
-        # 2. Fused Representation Layer
-        self.fusion_norm = nn.LayerNorm(d_model)
-        
-        # 3. Transformer Encoder (using modern Pre-LN architecture)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=d_model*4, dropout=0.1, batch_first=True, norm_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # 4. Output Head
-        self.output_head = nn.Linear(d_model, 1)
-
-    def forward(self, x_quant, x_qual):
-        # x_quant: (batch, features) | x_qual: (batch, features)
-        quant_embedding = self.quant_embed(x_quant)
-        
-        # Aggregate qualitative embeddings. Using mean for simplicity.
-        qual_embedding = self.qual_embed(x_qual).mean(dim=1)
-        
-        # Fuse and add a sequence dimension for the transformer
-        fused_embedding = torch.cat([quant_embedding, qual_embedding], dim=1)
-        fused_embedding = self.fusion_norm(fused_embedding).unsqueeze(1)
-        
-        transformer_out = self.transformer_encoder(fused_embedding)
-        prediction = self.output_head(transformer_out.squeeze(1))
-        return prediction
 
 def train_pytorch_model(model, X_train, y_train, X_test):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -273,7 +244,7 @@ The available operations are:
         return [{"operation": "create_rolling_std", "feature": "temp", "window": 5, "id": "fallback_err"}]
 
 def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'DAP'):
-    """Evaluates performance, adapted to handle the DAP model's special data needs."""
+    """Evaluates performance, adapted to handle different probe models."""
     eval_df = df.dropna()
     if eval_df.shape[0] < 50: return -99.0, None
 
@@ -315,8 +286,14 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
     # --- Model Training & Prediction ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if model_name == 'DAP':
-        model = DualStreamAttentionProbe(quant_input_size=X_train_q_s.shape[1], vocab_size=5).to(device)
+    if model_name in ['DAP', 'quantum_dual_stream']:
+        # 使用探针工厂创建模型
+        model = ProbeFactory.create_probe(
+            'dual_stream' if model_name == 'DAP' else 'quantum_dual_stream',
+            quant_input_size=X_train_q_s.shape[1],
+            vocab_size=5
+        ).to(device)
+        
         optimizer = optim.Adam(model.parameters(), lr=0.001)
         criterion = nn.MSELoss()
         
@@ -339,7 +316,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
             preds_scaled = model(torch.FloatTensor(X_test_q_s).to(device), torch.LongTensor(X_test_l.values).to(device))
         preds = scaler_y.inverse_transform(preds_scaled.cpu()).flatten()
 
-    else: # Fallback to a simple model for non-DAP evaluation
+    else: # Fallback to a simple model for non-probe evaluation
         model = lgb.LGBMRegressor(random_state=42)
         model.fit(X_train_q, y_train)
         preds = model.predict(X_test_q)
@@ -384,8 +361,12 @@ def save_results_to_json(results_data, probe_name):
             return float(o)
         if isinstance(o, (np.integer, np.int64, np.int32)):
             return int(o)
-        raise TypeError(f"Object of type {type(o)} is not JSON serializable")
-
+        if isinstance(o, (np.bool_)):
+            return bool(o)
+        if isinstance(o, (np.ndarray)):
+            return o.tolist()
+        return str(o) if hasattr(o, '__str__') else f"<non-serializable: {type(o)}>"
+    
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(results_data, f, indent=4, ensure_ascii=False, default=json_converter)
     print(f"\n✅ Results and configuration saved to {file_path}")
@@ -628,23 +609,57 @@ Task for Iteration {i+1}/{self.n_iterations}:
 
 def main():
     """Main function to run the DAP experiment."""
+    # ===== 配置变量 =====
+    DATASET_TYPE = 'total_cleaned'  # 可选: 'min_daily_temps' 或 'total_cleaned'
+    # 探针配置
+    PROBE_NAME = 'quantum_dual_stream'  # 可选: 'quantum_dual_stream', 'dual_stream', 'bayesian_quantum'
+    PROBE_CONFIG = {
+        'quant_input_size': None,  # 将在运行时设置
+        'vocab_size': 5,
+        'qual_embed_dim': 16,
+        'quant_embed_dim': 48
+    }
+    
+    # 实验配置
+    N_ITERATIONS = 10
+    TARGET_COL = 'temp'
+    TRAIN_TEST_SPLIT = 0.8
+    BATCH_SIZE = 32
+    N_EPOCHS = 50
+    LEARNING_RATE = 0.001
+    
+    # 数据配置
+    # DATA_PATH = 'data/min_daily_temps.csv'  # 不再需要
+    
     print("="*80)
-    print("🚀 T-LAFS Experiment: Dual-stream Attention Probe (DAP)")
+    print(f"🚀 T-LAFS Experiment: {PROBE_NAME.upper()} Probe")
     print("="*80)
 
-    setup_api_client() # You can re-enable this if you have set up your API keys
-    base_df = get_time_series_data()
-    target_col = 'temp'
+    # 初始化API客户端
+    setup_api_client()
     
-    tlafs = TLAFS_Algorithm(base_df=base_df, target_col=target_col, n_iterations=10, evaluation_model_name='DAP')
+    # 加载数据
+    base_df = get_time_series_data(DATASET_TYPE)
+    
+    # 创建并运行TLAFS算法
+    tlafs = TLAFS_Algorithm(
+        base_df=base_df,
+        target_col=TARGET_COL,
+        n_iterations=N_ITERATIONS,
+        evaluation_model_name=PROBE_NAME
+    )
     best_df, best_feature_plan, best_score_during_search = tlafs.run()
 
-    # --- Final Validation and Executive Summary ---
+    # --- 最终验证和总结 ---
     if best_df is not None:
         print("\n" + "="*40)
         print("🔬 FINAL VALIDATION ON ALL MODELS 🔬")
         print("="*40)
-        final_scores, final_results = evaluate_on_multiple_models(best_df, target_col, tlafs.evaluation_model_name)
+        final_scores, final_results = evaluate_on_multiple_models(
+            best_df,
+            TARGET_COL,
+            tlafs.evaluation_model_name
+        )
 
         if final_scores:
             best_final_model_name = max(final_scores, key=final_scores.get)
@@ -652,9 +667,9 @@ def main():
             best_result = final_results[best_final_model_name]
 
             print("\n" + "="*60)
-            print("🏆 EXECUTIVE SUMMARY: T-LAFS 'PROBE-AND-VALIDATE' STRATEGY 🏆")
+            print(f"🏆 EXECUTIVE SUMMARY: T-LAFS '{PROBE_NAME.upper()}' PROBE STRATEGY 🏆")
             print("="*60)
-            print(f"Feature engineering search was conducted by: '{tlafs.evaluation_model_name}' Probe")
+            print(f"Feature engineering search was conducted by: '{PROBE_NAME}' Probe")
             print(f"   - R² score during search phase: {best_score_during_search:.4f}")
             print(f"\nBest feature plan discovered:")
             print(json.dumps(best_feature_plan, indent=2, ensure_ascii=False))
@@ -672,17 +687,18 @@ def main():
                 y_true=best_result['y_true'],
                 y_pred=best_result['y_pred'],
                 best_model_name=best_final_model_name,
-                judge_model_name=tlafs.evaluation_model_name,
+                judge_model_name=PROBE_NAME,
                 best_model_score=best_final_score
             )
             
-            # --- Save Results to JSON ---
+            # --- 保存结果到JSON ---
             print("\n💾 Saving results to JSON...")
             results_to_save = {
-                "probe_model": tlafs.evaluation_model_name,
+                "probe_model": PROBE_NAME,
+                "probe_config": PROBE_CONFIG,
                 "best_score_during_search": best_score_during_search,
                 "best_feature_plan": best_feature_plan,
-                "final_features": [col for col in best_df.columns if col not in ['date', target_col]],
+                "final_features": [col for col in best_df.columns if col not in ['date', TARGET_COL]],
                 "final_validation_scores": final_scores,
                 "best_final_model": {
                     "name": best_final_model_name,
@@ -690,11 +706,10 @@ def main():
                 },
                 "run_history": tlafs.history
             }
-            save_results_to_json(results_to_save, tlafs.evaluation_model_name)
+            save_results_to_json(results_to_save, PROBE_NAME)
 
         else:
             print("\nCould not generate final validation scores.")
-
 
 if __name__ == "__main__":
     main()
