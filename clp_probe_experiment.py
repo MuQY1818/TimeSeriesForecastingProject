@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from probes import ProbeFactory, DualStreamAttentionProbe
+import shap
 
 warnings.filterwarnings('ignore')
 
@@ -150,13 +151,15 @@ def execute_plan(df: pd.DataFrame, plan: list):
         op = step.get("operation")
         try:
             # Handle single-feature operations
-            if op in ["create_lag", "create_diff", "create_rolling_mean", "create_rolling_std", "create_ewm", "create_rolling_skew", "create_rolling_kurt"]:
+            if op in ["create_lag", "create_diff", "create_rolling_mean", "create_rolling_std", "create_ewm", "create_rolling_skew", "create_rolling_kurt", "create_rolling_min", "create_rolling_max"]:
                 feature = step.get("feature")
                 new_col_name = f"{feature}_{step.get('id', 'new')}"
                 if op == "create_lag": temp_df[new_col_name] = temp_df[feature].shift(int(step["days"]))
                 elif op == "create_diff": temp_df[new_col_name] = temp_df[feature].diff(int(step.get("periods", 1)))
                 elif op == "create_rolling_mean": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).mean().shift(1)
                 elif op == "create_rolling_std": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).std().shift(1)
+                elif op == "create_rolling_min": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).min().shift(1)
+                elif op == "create_rolling_max": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).max().shift(1)
                 elif op == "create_ewm": temp_df[new_col_name] = temp_df[feature].ewm(span=int(step["span"]), adjust=False).mean().shift(1)
                 elif op == "create_rolling_skew": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).skew().shift(1)
                 elif op == "create_rolling_kurt": temp_df[new_col_name] = temp_df[feature].rolling(window=int(step["window"])).kurt().shift(1)
@@ -169,6 +172,21 @@ def execute_plan(df: pd.DataFrame, plan: list):
                     if part == "dayofweek": temp_df[new_col_name] = date_col.dt.dayofweek
                     elif part == "month": temp_df[new_col_name] = date_col.dt.month
                     elif part == "quarter": temp_df[new_col_name] = date_col.dt.quarter
+                    elif part == "dayofyear": temp_df[new_col_name] = date_col.dt.dayofyear
+                    elif part == "weekofyear": temp_df[new_col_name] = date_col.dt.isocalendar().week.astype(int)
+                    elif part == "is_weekend": temp_df[new_col_name] = (date_col.dt.dayofweek >= 5).astype(int)
+
+            # Handle Fourier Features for seasonality
+            elif op == "create_fourier_features":
+                date_col = pd.to_datetime(temp_df[step.get("feature")])
+                period = float(step["period"])
+                order = int(step["order"])
+                time_idx = (date_col - date_col.min()).dt.days
+                for k in range(1, order + 1):
+                    sin_col = f"fourier_sin_{k}_{int(period)}_{step.get('id', 'new')}"
+                    cos_col = f"fourier_cos_{k}_{int(period)}_{step.get('id', 'new')}"
+                    temp_df[sin_col] = np.sin(2 * np.pi * k * time_idx / period)
+                    temp_df[cos_col] = np.cos(2 * np.pi * k * time_idx / period)
             
             # Handle multi-feature interactions
             elif op == "create_interaction":
@@ -214,15 +232,23 @@ You will be given the current features, their importance, and a list of availabl
 Your response MUST be a valid JSON object with a single key "plan", where the value is a list of dictionaries. Each dictionary represents one operation.
 Example: {"plan": [{"operation": "create_rolling_mean", "feature": "temp", "window": 7, "id": "T1A"}]}
 Do NOT add any extra text, explanations, or markdown formatting around the JSON response.
+You will also receive a 'SHAP Contribution' score for each feature. This score is the correlation between a feature's value and its impact on the model's prediction.
+- A high positive value (e.g., > 0.5) means the feature has a positive relationship with the target (higher value -> higher prediction).
+- A high negative value (e.g., < -0.5) means a negative relationship (higher value -> lower prediction).
+- A value near 0 suggests a complex, non-monotonic, or weak relationship.
+Use this directional information to make more intelligent feature engineering decisions.
 The available operations are:
 - `create_lag`: { "operation": "create_lag", "feature": "<feature_name>", "days": <int>, "id": "<unique_id>" }
 - `create_diff`: { "operation": "create_diff", "feature": "<feature_name>", "periods": <int>, "id": "<unique_id>" }
 - `create_rolling_mean`: { "operation": "create_rolling_mean", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
 - `create_rolling_std`: { "operation": "create_rolling_std", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
+- `create_rolling_min`: { "operation": "create_rolling_min", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
+- `create_rolling_max`: { "operation": "create_rolling_max", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
 - `create_ewm`: { "operation": "create_ewm", "feature": "<feature_name>", "span": <int>, "id": "<unique_id>" }
 - `create_rolling_skew`: { "operation": "create_rolling_skew", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
 - `create_rolling_kurt`: { "operation": "create_rolling_kurt", "feature": "<feature_name>", "window": <int>, "id": "<unique_id>" }
-- `create_time_features`: { "operation": "create_time_features", "feature": "date", "extract": ["dayofweek", "month", "quarter"], "id": "<unique_id>" }
+- `create_time_features`: { "operation": "create_time_features", "feature": "date", "extract": ["dayofweek", "month", "quarter", "dayofyear", "weekofyear", "is_weekend"], "id": "<unique_id>" }
+- `create_fourier_features`: { "operation": "create_fourier_features", "feature": "date", "period": <float>, "order": <int>, "id": "<unique_id>" } (Captures seasonality. `period` is season length e.g. 365.25 for annual, 7 for weekly. `order` is number of sin/cos pairs.)
 - `create_interaction`: { "operation": "create_interaction", "features": ["<numeric_feature1>", "<numeric_feature2>"], "id": "<unique_id>" } (NOTE: Both features must be numeric)
 - `delete_feature`: { "operation": "delete_feature", "feature": "<feature_to_delete>", "id": "<unique_id>" }
 """
@@ -246,7 +272,7 @@ The available operations are:
 def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'DAP'):
     """Evaluates performance, adapted to handle different probe models."""
     eval_df = df.dropna()
-    if eval_df.shape[0] < 50: return -99.0, None
+    if eval_df.shape[0] < 50: return -99.0, None, None
 
     # Standard features for all models
     features = [c for c in eval_df.columns if c not in [target_col, 'date', 'store_id', 'product_category']]
@@ -261,7 +287,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
 
     if not features:
         print("  - ⚠️ Warning: No numeric features found to evaluate.")
-        return -99.0, None
+        return -99.0, None, None
 
     X_quant = eval_df[features]
     y = eval_df[target_col]
@@ -275,7 +301,7 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
     X_train_l, X_test_l = X_qual[:train_size], X_qual[train_size:]
     y_train, y_test = y[:train_size], y[train_size:]
 
-    if len(X_train_q) < 1: return -99.0, None
+    if len(X_train_q) < 1: return -99.0, None, None
 
     # Scale quantitative data
     scaler_X, scaler_y = MinMaxScaler(), MinMaxScaler()
@@ -285,11 +311,13 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
 
     # --- Model Training & Prediction ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    shap_values_quant = None
     
-    if model_name in ['DAP', 'quantum_dual_stream']:
+    if model_name in ['DAP', 'quantum_dual_stream', 'bayesian_quantum']:
         # 使用探针工厂创建模型
+        probe_name_for_factory = 'dual_stream' if model_name == 'DAP' else model_name
         model = ProbeFactory.create_probe(
-            'dual_stream' if model_name == 'DAP' else 'quantum_dual_stream',
+            probe_name_for_factory,
             quant_input_size=X_train_q_s.shape[1],
             vocab_size=5
         ).to(device)
@@ -316,10 +344,64 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
             preds_scaled = model(torch.FloatTensor(X_test_q_s).to(device), torch.LongTensor(X_test_l.values).to(device))
         preds = scaler_y.inverse_transform(preds_scaled.cpu()).flatten()
 
+        # SHAP for PyTorch models using KernelExplainer as a last resort
+        # Add a safety check: KernelExplainer's kmeans summary can be unstable with very few features.
+        if X_train_q_s.shape[1] > 2:
+            try:
+                # 1. Create a wrapper function for the model
+                # KernelExplainer needs a function that takes a numpy array and returns a numpy array.
+                def f(x):
+                    # x is a numpy array of shape (n_samples, n_features)
+                    # It will be a mix of quantitative and qualitative features, so we need to split them.
+                    n_quant = X_train_q_s.shape[1]
+                    x_quant_part = x[:, :n_quant]
+                    x_qual_part = x[:, n_quant:]
+
+                    # Convert to tensors
+                    quant_tensor = torch.FloatTensor(x_quant_part).to(device)
+                    qual_tensor = torch.LongTensor(x_qual_part).to(device)
+                    
+                    # Run model
+                    model.eval()
+                    with torch.no_grad():
+                        predictions_scaled = model(quant_tensor, qual_tensor)
+                    
+                    return predictions_scaled.cpu().numpy()
+
+                # 2. Create the background dataset for KernelExplainer
+                # We combine quant and qual training data and summarize it using k-means.
+                X_train_combined = np.hstack([X_train_q_s, X_train_l.values])
+                # Use a smaller sample for k-means to speed it up
+                background_data_summary = shap.kmeans(X_train_combined, 10) # 10 centers
+
+                # 3. Create and run the explainer
+                explainer = shap.KernelExplainer(f, background_data_summary)
+                
+                # Combine test data for explanation
+                X_test_combined = np.hstack([X_test_q_s, X_test_l.values])
+                
+                # Explain a smaller sample to avoid excessive runtimes
+                sample_size_for_shap = 50 
+                shap_values_combined = explainer.shap_values(X_test_combined[:sample_size_for_shap, :], nsamples=50)
+                
+                # We are interested in the SHAP values for the quantitative inputs only
+                shap_values_quant = shap_values_combined[:, :X_train_q_s.shape[1]]
+
+            except Exception as e:
+                print(f"  - ⚠️ Warning: SHAP calculation failed for {model_name}: {e}")
+        else:
+            print(f"  - ℹ️ Info: Skipping SHAP calculation for low feature count ({X_train_q_s.shape[1]}) to ensure stability.")
+
     else: # Fallback to a simple model for non-probe evaluation
         model = lgb.LGBMRegressor(random_state=42)
         model.fit(X_train_q, y_train)
         preds = model.predict(X_test_q)
+        # SHAP for tree-based models
+        try:
+            explainer = shap.TreeExplainer(model)
+            shap_values_quant = explainer.shap_values(X_test_q)
+        except Exception as e:
+            print(f"  - ⚠️ Warning: SHAP calculation failed for LGBM: {e}")
     
     score = r2_score(y_test, preds)
 
@@ -335,7 +417,32 @@ def evaluate_performance(df: pd.DataFrame, target_col: str, model_name: str = 'D
     
     feature_importances = pd.Series(importances, index=X_quant.columns).sort_values(ascending=False)
     
-    return score, feature_importances
+    # Calculate SHAP Contribution (Directional Importance)
+    shap_contributions = None
+    if shap_values_quant is not None:
+        contributions = {}
+        # We only have SHAP values for a sample of the test set, so we match that sample size.
+        num_shap_samples = shap_values_quant.shape[0]
+        
+        for i, col in enumerate(X_test_q.columns):
+            # Correlation between feature values and their SHAP values
+            feature_values = X_test_q[col].values[:num_shap_samples] # Match the sample size
+            # Flatten the SHAP values to ensure the shape is (n_samples,) to match feature_values
+            shap_vals_for_feat = shap_values_quant[:, i].flatten()
+            
+            # Avoid correlation with constant feature
+            if feature_values.std() > 0:
+                try:
+                    corr = np.corrcoef(feature_values, shap_vals_for_feat)[0, 1]
+                    contributions[col] = np.nan_to_num(corr) # Handle potential NaNs
+                except ValueError:
+                    # This can happen in rare cases if shapes are still mismatched for some reason.
+                    contributions[col] = 0.0
+            else:
+                contributions[col] = 0.0
+        shap_contributions = pd.Series(contributions).sort_values(ascending=False)
+
+    return score, feature_importances, shap_contributions
 
 def visualize_final_predictions(dates, y_true, y_pred, best_model_name, judge_model_name, best_model_score):
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -509,6 +616,7 @@ class TLAFS_Algorithm:
         self.best_df = self.base_df.copy()
         self.feature_id_counter = 1
         self.last_feature_importances = None
+        self.last_shap_contributions = None
         self.available_operations = {
             "trend": ["create_rolling_mean", "create_rolling_std", "create_ewm"],
             "lag_and_diff": ["create_lag", "create_diff"],
@@ -531,12 +639,17 @@ class TLAFS_Algorithm:
         for i in range(self.n_iterations):
             print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Judge: {self.evaluation_model_name}) -----")
             
-            baseline_score, importances = evaluate_performance(current_df, self.target_col, model_name=self.evaluation_model_name)
+            baseline_score, importances, shap_contribs = evaluate_performance(current_df, self.target_col, model_name=self.evaluation_model_name)
             
             if importances is not None:
                 self.last_feature_importances = importances
                 print("  - Current Feature Importances:")
                 print(self.last_feature_importances.head(3).to_string())
+
+            if shap_contribs is not None:
+                self.last_shap_contributions = shap_contribs
+                print("  - Current SHAP Contributions (Directional Impact):")
+                print(self.last_shap_contributions.head(3).to_string())
 
             if baseline_score > self.best_score:
                 self.best_score = baseline_score
@@ -552,6 +665,8 @@ Current State:
 - Current Features: {list(self.best_df.columns)}
 - Feature Importances (lower is worse): 
 {self.last_feature_importances.to_string() if self.last_feature_importances is not None else "Not available."}
+- SHAP Contribution (Feature-Prediction Correlation):
+{self.last_shap_contributions.to_string() if self.last_shap_contributions is not None else "Not available."}
 
 Task for Iteration {i+1}/{self.n_iterations}:
 """
@@ -574,7 +689,7 @@ Task for Iteration {i+1}/{self.n_iterations}:
             print("\nStep 2: Evaluating the new feature combo plan...")
             # If deleting, apply to the current best_df. If adding, also apply to best_df.
             temp_df_extended = execute_plan(self.best_df, plan_extension)
-            score, _ = evaluate_performance(temp_df_extended, self.target_col, model_name=self.evaluation_model_name)
+            score, _, _ = evaluate_performance(temp_df_extended, self.target_col, model_name=self.evaluation_model_name)
             print(f"  - Score with new feature combo: {score:.4f}")
             
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
@@ -610,7 +725,7 @@ Task for Iteration {i+1}/{self.n_iterations}:
 def main():
     """Main function to run the DAP experiment."""
     # ===== 配置变量 =====
-    DATASET_TYPE = 'total_cleaned'  # 可选: 'min_daily_temps' 或 'total_cleaned'
+    DATASET_TYPE = 'min_daily_temps'  # 可选: 'min_daily_temps' 或 'total_cleaned'
     # 探针配置
     PROBE_NAME = 'quantum_dual_stream'  # 可选: 'quantum_dual_stream', 'dual_stream', 'bayesian_quantum'
     PROBE_CONFIG = {

@@ -1,12 +1,12 @@
 {
-    "probe_model": "quantum_dual_stream",
+    "probe_model": "bayesian_quantum_dual_stream",
     "probe_config": {
         "quant_input_size": null,
         "vocab_size": 5,
         "qual_embed_dim": 16,
         "quant_embed_dim": 48
     },
-    "best_score_during_search": 0.9999119428897708,
+    "best_score_during_search": 0.8659005830594854,
     "best_feature_plan": [
         {
             "operation": "create_lag",
@@ -15,97 +15,59 @@
             "id": "init"
         },
         {
-            "operation": "create_rolling_mean",
-            "feature": "temp",
-            "window": 7,
-            "id": "T1A"
-        },
-        {
             "operation": "create_interaction",
             "features": [
                 "temp",
                 "temp_init"
             ],
+            "id": "I1A"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "feature": "temp",
+            "window": 7,
             "id": "T1B"
-        },
-        {
-            "operation": "create_rolling_mean",
-            "feature": "temp",
-            "window": 3,
-            "id": "T2B"
-        },
-        {
-            "operation": "create_diff",
-            "feature": "temp",
-            "periods": 1,
-            "id": "T5A"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp",
-                "temp_init"
-            ],
-            "id": "T5B"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp_T5A",
-                "temp_x_temp_init_T5B"
-            ],
-            "id": "T7A"
-        },
-        {
-            "operation": "create_rolling_mean",
-            "feature": "temp_T2B",
-            "window": 7,
-            "id": "T7B"
         }
     ],
     "final_features": [
         "temp_init",
-        "temp_T1A",
-        "temp_x_temp_init_T1B",
-        "temp_T2B",
-        "temp_T5A",
-        "temp_x_temp_init_T5B",
-        "temp_T5A_x_temp_x_temp_init_T5B_T7A",
-        "temp_T2B_T7B"
+        "temp_x_temp_init_I1A",
+        "temp_T1B"
     ],
     "final_validation_scores": {
-        "LightGBM": 0.9990550885230932,
-        "RandomForest": 0.9993697363161865,
-        "XGBoost": 0.9986637258935108,
-        "SimpleNN": 0.9986679958164383,
-        "EnhancedNN (LSTM+Attn)": 0.9975312391382897,
-        "Transformer": 0.9977476968053874,
-        "DAP": 0.9977194614682547
+        "LightGBM": 0.8342467345945601,
+        "RandomForest": 0.8668138431835001,
+        "XGBoost": 0.9041192169421827,
+        "SimpleNN": 0.9247988645188018,
+        "EnhancedNN (LSTM+Attn)": 0.9135120789845348,
+        "Transformer": 0.9618492343973468,
+        "DAP": 0.939343219601256,
+        "BayesianQuantumDualStream": 0.8506508932089214
     },
     "best_final_model": {
-        "name": "RandomForest",
-        "score": 0.9993697363161865
+        "name": "Transformer",
+        "score": 0.9618492343973468
     },
     "run_history": [
         {
             "iteration": 1,
             "plan": [
                 {
-                    "operation": "create_rolling_mean",
-                    "feature": "temp",
-                    "window": 7,
-                    "id": "T1A"
-                },
-                {
                     "operation": "create_interaction",
                     "features": [
                         "temp",
                         "temp_init"
                     ],
+                    "id": "I1A"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 7,
                     "id": "T1B"
                 }
             ],
-            "score": 0.9962368480005129,
+            "score": 0.812971503630095,
             "adopted": false
         },
         {
@@ -117,16 +79,16 @@
                         "temp",
                         "temp_init"
                     ],
-                    "id": "T2A"
+                    "id": "I2A"
                 },
                 {
                     "operation": "create_rolling_mean",
                     "feature": "temp",
-                    "window": 3,
+                    "window": 5,
                     "id": "T2B"
                 }
             ],
-            "score": 0.9980545907126298,
+            "score": 0.8136949105627693,
             "adopted": false
         },
         {
@@ -134,11 +96,11 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_T2B",
-                    "id": "D1"
+                    "feature": "temp_x_temp_init_I1A",
+                    "id": "D3A"
                 }
             ],
-            "score": 0.9935113984922613,
+            "score": 0.3310314173865093,
             "adopted": false
         },
         {
@@ -155,32 +117,32 @@
                 {
                     "operation": "create_rolling_mean",
                     "feature": "temp",
-                    "window": 5,
-                    "id": "I4B"
+                    "window": 7,
+                    "id": "T4B"
                 }
             ],
-            "score": 0.9965307121032244,
+            "score": 0.780541924153476,
             "adopted": false
         },
         {
             "iteration": 5,
             "plan": [
                 {
-                    "operation": "create_diff",
-                    "feature": "temp",
-                    "periods": 1,
-                    "id": "T5A"
-                },
-                {
                     "operation": "create_interaction",
                     "features": [
                         "temp",
                         "temp_init"
                     ],
+                    "id": "I5A"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 7,
                     "id": "T5B"
                 }
             ],
-            "score": 0.999837077161598,
+            "score": 0.7762391062647025,
             "adopted": false
         },
         {
@@ -188,11 +150,11 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_x_temp_init_T2A",
-                    "id": "D6A"
+                    "feature": "temp_init",
+                    "id": "D1A"
                 }
             ],
-            "score": 0.9998930939920916,
+            "score": 0.6700631647116226,
             "adopted": false
         },
         {
@@ -201,19 +163,19 @@
                 {
                     "operation": "create_interaction",
                     "features": [
-                        "temp_T5A",
-                        "temp_x_temp_init_T5B"
+                        "temp",
+                        "temp_init"
                     ],
-                    "id": "T7A"
+                    "id": "I7A"
                 },
                 {
-                    "operation": "create_rolling_mean",
-                    "feature": "temp_T2B",
+                    "operation": "create_rolling_kurt",
+                    "feature": "temp",
                     "window": 7,
                     "id": "T7B"
                 }
             ],
-            "score": 0.9999119428897708,
+            "score": 0.8111310446969935,
             "adopted": false
         },
         {
@@ -222,19 +184,19 @@
                 {
                     "operation": "create_interaction",
                     "features": [
-                        "temp_T5A",
-                        "temp_x_temp_init_T5B"
+                        "temp",
+                        "temp_init"
                     ],
                     "id": "I8A"
                 },
                 {
                     "operation": "create_rolling_mean",
-                    "feature": "temp_T2B",
-                    "window": 7,
-                    "id": "R8B"
+                    "feature": "temp",
+                    "window": 5,
+                    "id": "T8B"
                 }
             ],
-            "score": 0.9997775139754811,
+            "score": 0.7612496227308392,
             "adopted": false
         },
         {
@@ -242,32 +204,32 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_T5A",
-                    "id": "D1"
+                    "feature": "temp_init",
+                    "id": "D9A"
                 }
             ],
-            "score": 0.9956526296793162,
+            "score": 0.7021578044705219,
             "adopted": false
         },
         {
             "iteration": 10,
             "plan": [
                 {
-                    "operation": "create_interaction",
-                    "features": [
-                        "temp_T5A",
-                        "temp_x_temp_init_T5B"
-                    ],
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 3,
                     "id": "T10A"
                 },
                 {
-                    "operation": "create_rolling_skew",
-                    "feature": "temp_T2B",
-                    "window": 7,
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
                     "id": "T10B"
                 }
             ],
-            "score": 0.9991598825185258,
+            "score": 0.8001305842929884,
             "adopted": false
         }
     ]

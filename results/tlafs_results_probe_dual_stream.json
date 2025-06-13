@@ -1,6 +1,12 @@
 {
-    "probe_model": "CLP",
-    "best_score_during_search": 0.9966,
+    "probe_model": "dual_stream",
+    "probe_config": {
+        "quant_input_size": null,
+        "vocab_size": 5,
+        "qual_embed_dim": 16,
+        "quant_embed_dim": 48
+    },
+    "best_score_during_search": 0.8371239279874487,
     "best_feature_plan": [
         {
             "operation": "create_lag",
@@ -15,95 +21,24 @@
                 "temp_init"
             ],
             "id": "T1A"
-        },
-        {
-            "operation": "create_rolling_mean",
-            "feature": "temp",
-            "window": 7,
-            "id": "T1B"
-        },
-        {
-            "operation": "create_rolling_mean",
-            "feature": "temp",
-            "window": 5,
-            "id": "T2A"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp_init",
-                "temp"
-            ],
-            "id": "T2B"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp",
-                "temp_T2A"
-            ],
-            "id": "T4A"
-        },
-        {
-            "operation": "create_rolling_mean",
-            "feature": "temp",
-            "window": 5,
-            "id": "T4B"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp_init",
-                "temp_T2A"
-            ],
-            "id": "I5A"
-        },
-        {
-            "operation": "create_rolling_mean",
-            "feature": "temp",
-            "window": 5,
-            "id": "T5A"
-        },
-        {
-            "operation": "create_interaction",
-            "features": [
-                "temp",
-                "temp_T2A"
-            ],
-            "id": "T7A"
-        },
-        {
-            "operation": "create_rolling_kurt",
-            "feature": "temp",
-            "window": 5,
-            "id": "T7B"
         }
     ],
     "final_features": [
         "temp_init",
-        "temp_x_temp_init_T1A",
-        "temp_T1B",
-        "temp_T2A",
-        "temp_init_x_temp_T2B",
-        "temp_x_temp_T2A_T4A",
-        "temp_T4B",
-        "temp_init_x_temp_T2A_I5A",
-        "temp_T5A",
-        "temp_x_temp_T2A_T7A",
-        "temp_T7B"
+        "temp_x_temp_init_T1A"
     ],
     "final_validation_scores": {
-        "LightGBM": 0.9962,
-        "RandomForest": 0.9974,
-        "XGBoost": 0.9947,
-        "SimpleNN": 0.9852,
-        "EnhancedNN (LSTM+Attn)": 0.995,
-        "Transformer": 0.9977,
-        "CLP": 0.9956
+        "LightGBM": 0.8371239279874487,
+        "RandomForest": 0.90137646298374,
+        "XGBoost": 0.9239479087779902,
+        "SimpleNN": 0.9653077389206528,
+        "EnhancedNN (LSTM+Attn)": 0.9577273383338377,
+        "Transformer": 0.9327803504849579,
+        "DAP": 0.9440950379289873
     },
     "best_final_model": {
-        "name": "Transformer",
-        "score": 0.9977
+        "name": "SimpleNN",
+        "score": 0.9653077389206528
     },
     "run_history": [
         {
@@ -124,40 +59,40 @@
                     "id": "T1B"
                 }
             ],
-            "score": 0.9375,
-            "adopted": true
+            "score": 0.8342467345945601,
+            "adopted": false
         },
         {
             "iteration": 2,
             "plan": [
                 {
-                    "operation": "create_rolling_mean",
-                    "feature": "temp",
-                    "window": 5,
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp",
+                        "temp_init"
+                    ],
                     "id": "T2A"
                 },
                 {
-                    "operation": "create_interaction",
-                    "features": [
-                        "temp_init",
-                        "temp"
-                    ],
+                    "operation": "create_rolling_mean",
+                    "feature": "temp",
+                    "window": 5,
                     "id": "T2B"
                 }
             ],
-            "score": 0.9849,
-            "adopted": true
+            "score": 0.8332625665686735,
+            "adopted": false
         },
         {
             "iteration": 3,
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_init_x_temp_T2B",
+                    "feature": "temp_T1B",
                     "id": "T3A"
                 }
             ],
-            "score": 0.9738,
+            "score": 0.8371239279874487,
             "adopted": false
         },
         {
@@ -167,19 +102,19 @@
                     "operation": "create_interaction",
                     "features": [
                         "temp",
-                        "temp_T2A"
+                        "temp_init"
                     ],
-                    "id": "T4A"
+                    "id": "I4A"
                 },
                 {
                     "operation": "create_rolling_mean",
                     "feature": "temp",
                     "window": 5,
-                    "id": "T4B"
+                    "id": "R4B"
                 }
             ],
-            "score": 0.9953,
-            "adopted": true
+            "score": 0.8284832659824534,
+            "adopted": false
         },
         {
             "iteration": 5,
@@ -187,31 +122,31 @@
                 {
                     "operation": "create_interaction",
                     "features": [
-                        "temp_init",
-                        "temp_T2A"
+                        "temp",
+                        "temp_init"
                     ],
-                    "id": "I5A"
+                    "id": "T5A"
                 },
                 {
                     "operation": "create_rolling_mean",
                     "feature": "temp",
-                    "window": 5,
-                    "id": "T5A"
+                    "window": 7,
+                    "id": "T5B"
                 }
             ],
-            "score": 0.9965,
-            "adopted": true
+            "score": 0.8342467345945601,
+            "adopted": false
         },
         {
             "iteration": 6,
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_init_x_temp_T2B",
-                    "id": "D6A"
+                    "feature": "temp_init",
+                    "id": "T6A"
                 }
             ],
-            "score": 0.9836,
+            "score": 0.6620921836756826,
             "adopted": false
         },
         {
@@ -221,19 +156,19 @@
                     "operation": "create_interaction",
                     "features": [
                         "temp",
-                        "temp_T2A"
+                        "temp_init"
                     ],
-                    "id": "T7A"
+                    "id": "T7B"
                 },
                 {
-                    "operation": "create_rolling_kurt",
+                    "operation": "create_rolling_mean",
                     "feature": "temp",
-                    "window": 5,
-                    "id": "T7B"
+                    "window": 3,
+                    "id": "T7C"
                 }
             ],
-            "score": 0.9966,
-            "adopted": true
+            "score": 0.8154963421782817,
+            "adopted": false
         },
         {
             "iteration": 8,
@@ -242,18 +177,18 @@
                     "operation": "create_interaction",
                     "features": [
                         "temp",
-                        "temp_T2A"
+                        "temp_init"
                     ],
-                    "id": "T8A"
+                    "id": "T8B"
                 },
                 {
-                    "operation": "create_rolling_skew",
+                    "operation": "create_rolling_mean",
                     "feature": "temp",
-                    "window": 5,
-                    "id": "T8B"
+                    "window": 3,
+                    "id": "T8C"
                 }
             ],
-            "score": 0.9783,
+            "score": 0.8154963421782817,
             "adopted": false
         },
         {
@@ -261,11 +196,11 @@
             "plan": [
                 {
                     "operation": "delete_feature",
-                    "feature": "temp_x_temp_T2A_T7A",
-                    "id": "D9A"
+                    "feature": "temp_x_temp_init_T1A",
+                    "id": "T9A"
                 }
             ],
-            "score": 0.9892,
+            "score": 0.30527064215793664,
             "adopted": false
         },
         {
@@ -275,19 +210,19 @@
                     "operation": "create_interaction",
                     "features": [
                         "temp",
-                        "temp_T7B"
+                        "temp_init"
                     ],
-                    "id": "I10A"
+                    "id": "T10A"
                 },
                 {
-                    "operation": "create_rolling_std",
+                    "operation": "create_rolling_mean",
                     "feature": "temp",
                     "window": 5,
-                    "id": "R10B"
+                    "id": "T10B"
                 }
             ],
-            "score": 0.993,
+            "score": 0.8284832659824534,
             "adopted": false
         }
     ]
-} 
+}
