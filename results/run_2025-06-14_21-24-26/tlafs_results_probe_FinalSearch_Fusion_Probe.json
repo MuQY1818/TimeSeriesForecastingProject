@@ -1,0 +1,335 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_Fusion_Probe",
+    "best_score_during_search": 0.3530288508621559,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 365.25,
+            "order": 4
+        },
+        {
+            "operation": "create_rolling_mean",
+            "on": "temp",
+            "window": 7,
+            "id": "temp_rolling_mean_7d"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "on": "temp_lag1",
+            "window": 7,
+            "id": "temp_lag1_rollmean_7d"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 365.25,
+            "order": 4
+        },
+        {
+            "operation": "create_diff",
+            "on": "temp_lag1",
+            "periods": 1,
+            "id": "temp_lag1_diff_1d"
+        },
+        {
+            "operation": "create_ewm",
+            "on": "temp_lag1",
+            "span": 7,
+            "id": "temp_lag1_ewm_7d"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "fourier_sin_1_365",
+        "fourier_cos_1_365",
+        "fourier_sin_2_365",
+        "fourier_cos_2_365",
+        "fourier_sin_3_365",
+        "fourier_cos_3_365",
+        "fourier_sin_4_365",
+        "fourier_cos_4_365",
+        "temp_rolling_mean_7d",
+        "temp_lag1_rollmean_7d",
+        "temp_lag1_diff_1d",
+        "temp_lag1_ewm_7d"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.3793713311287462,
+            "mae": 32398.928064623342,
+            "rmse": 69836.91150616335
+        },
+        "RandomForest": {
+            "r2": 0.3362272448416507,
+            "mae": 32828.54780051151,
+            "rmse": 72223.54799950094
+        },
+        "XGBoost": {
+            "r2": 0.29165875325990664,
+            "mae": 34363.167569133635,
+            "rmse": 74608.85479896567
+        },
+        "CatBoost": {
+            "r2": 0.4154065385775396,
+            "mae": 30293.295351038312,
+            "rmse": 67779.14480693066
+        },
+        "TabNet": {
+            "r2": -0.8830165786781954,
+            "mae": 83486.41055135897,
+            "rmse": 121645.53701494932
+        },
+        "SimpleNN": {
+            "r2": 0.2879491636255229,
+            "mae": 33042.97652753357,
+            "rmse": 74803.96331619858
+        },
+        "EnhancedNN": {
+            "r2": 0.31844853036327614,
+            "mae": 31707.30131074169,
+            "rmse": 73184.38665252882
+        },
+        "Transformer": {
+            "r2": 0.3563266175013311,
+            "mae": 34537.77175911125,
+            "rmse": 71121.65977934645
+        }
+    },
+    "best_final_model": {
+        "name": "CatBoost",
+        "metrics": {
+            "r2": 0.4154065385775396,
+            "mae": 30293.295351038312,
+            "rmse": 67779.14480693066
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "period": 365.25,
+                    "order": 4
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "on": "temp",
+                    "window": 7,
+                    "id": "temp_rolling_mean_7d"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.31735157378323514,
+                "r2_lgbm": 0.39473511658971727,
+                "r2_nn": 0.239968030976753,
+                "num_features": 14
+            },
+            "adopted": true,
+            "reward": -0.0030233153055347906
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_rolling_mean",
+                    "on": "temp_lag1",
+                    "window": 7,
+                    "id": "temp_lag1_rollmean_7d"
+                },
+                {
+                    "operation": "create_fourier_features",
+                    "period": 365.25,
+                    "order": 4
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3327554198043106,
+                "r2_lgbm": 0.3740833723703102,
+                "r2_nn": 0.29142746723831103,
+                "num_features": 15
+            },
+            "adopted": true,
+            "reward": 0.015403846021075474
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_rolling_std",
+                    "on": "temp_lag1",
+                    "window": 7,
+                    "id": "temp_lag1_rollstd_7d"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp_lag1",
+                        "month"
+                    ],
+                    "id": "temp_lag1_month_inter"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.28605991389528546,
+                "r2_lgbm": 0.34921468900599917,
+                "r2_nn": 0.22290513878457174,
+                "num_features": 17
+            },
+            "adopted": false,
+            "reward": -0.04669550590902516
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_diff",
+                    "on": "temp_lag1",
+                    "periods": 1,
+                    "id": "temp_lag1_diff_1d"
+                },
+                {
+                    "operation": "create_ewm",
+                    "on": "temp_lag1",
+                    "span": 7,
+                    "id": "temp_lag1_ewm_7d"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3530288508621559,
+                "r2_lgbm": 0.3779592103280436,
+                "r2_nn": 0.32809849139626823,
+                "num_features": 17
+            },
+            "adopted": true,
+            "reward": 0.020273431057845293
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_probe_features"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3375146831085748,
+                "r2_lgbm": 0.37607267228445573,
+                "r2_nn": 0.29895669393269386,
+                "num_features": 86
+            },
+            "adopted": false,
+            "reward": -0.01551416775358111
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_probe_features"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3263477600551281,
+                "r2_lgbm": 0.37607267228445573,
+                "r2_nn": 0.2766228478258005,
+                "num_features": 86
+            },
+            "adopted": false,
+            "reward": -0.026681090807027796
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "temp_embedding_365d"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "temp_embedding_365d",
+                        "temp_lag1"
+                    ],
+                    "id": "temp_embed_365d_x_lag1"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.29414236489823525,
+                "r2_lgbm": 0.3362081547621062,
+                "r2_nn": 0.2520765750343643,
+                "num_features": 81
+            },
+            "adopted": false,
+            "reward": -0.058886485963920654
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_probe_features"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3245325656369472,
+                "r2_lgbm": 0.37607267228445573,
+                "r2_nn": 0.2729924589894387,
+                "num_features": 86
+            },
+            "adopted": false,
+            "reward": -0.028496285225208695
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_probe_features"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.32128893486796495,
+                "r2_lgbm": 0.37607267228445573,
+                "r2_nn": 0.26650519745147416,
+                "num_features": 86
+            },
+            "adopted": false,
+            "reward": -0.03173991599419096
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "learned_embedding_365d"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "learned_embedding_365d",
+                        "fourier_cos_1_365"
+                    ],
+                    "id": "le_365d_fourier_interaction"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.318066208105992,
+                "r2_lgbm": 0.3362081547621062,
+                "r2_nn": 0.2999242614498778,
+                "num_features": 81
+            },
+            "adopted": false,
+            "reward": -0.0349626427561639
+        }
+    ]
+}

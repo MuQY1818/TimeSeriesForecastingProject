@@ -22,7 +22,7 @@ from pytorch_tabnet.tab_model import TabNetRegressor
 from catboost import CatBoostRegressor
 import re
 from collections import defaultdict
-from sklearn.decomposition import PCA
+from probe_forecaster_utils import train_probe_forecaster, generate_probe_features, ProbeForecaster, PositionalEncoding, AgentAttentionProbe
 
 warnings.filterwarnings('ignore')
 
@@ -34,52 +34,41 @@ def setup_api_client():
     """Initializes the Google Gemini API client."""
     global gemini_model
     try:
-        # --- Direct API Configuration (for demonstration) ---
-        # For security, it's recommended to use environment variables in production.
         api_key = "sk-O4mZi7nZvCpp11x0UgbrIN5dr6jdNmTocD9ADso1S1ZWJzdL"
         base_url = "https://api.openai-proxy.org/google"
-
         genai.configure(
             api_key=api_key,
             transport="rest",
             client_options={"api_endpoint": base_url},
         )
-        
-        # This is important for getting structured output
         generation_config = {"response_mime_type": "application/json"}
-        
         gemini_model = genai.GenerativeModel(
             'gemini-2.5-flash-preview-05-20',
             generation_config=generation_config
         )
-        
-        # Test connection by listing models
         genai.list_models() 
         print("✅ Gemini client initialized and connection successful.")
     except Exception as e:
         print(f"❌ Failed to initialize Gemini client: {e}")
         exit()
 
-# --- Data Handling & DAP Specifics ---
+# --- Data Handling ---
 def get_time_series_data(dataset_type='min_daily_temps'):
-    if dataset_type == 'min_daily_temps':
-        csv_path = 'data/min_daily_temps.csv'
-        df = pd.read_csv(csv_path)
-        df.rename(columns={'Date': 'date', 'Temp': 'temp'}, inplace=True)
-    elif dataset_type == 'total_cleaned':
+    if dataset_type == 'total_cleaned':
         csv_path = 'data/total_cleaned.csv'
         df = pd.read_csv(csv_path)
         df.rename(columns={'日期': 'date', '成交商品件数': 'temp'}, inplace=True)
-    else:
-        raise ValueError('Unknown dataset type')
+    else: # Default to min_daily_temps
+        csv_path = 'data/min_daily_temps.csv'
+        df = pd.read_csv(csv_path)
+        df.rename(columns={'Date': 'date', 'Temp': 'temp'}, inplace=True)
+        
     df['date'] = pd.to_datetime(df['date'])
     df.sort_values('date', inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
 # --- Model Definitions ---
-
-# Baseline models (copied from t_lafs_demo.py)
 class SimpleNN(nn.Module):
     def __init__(self, input_size):
         super(SimpleNN, self).__init__()
@@ -90,20 +79,7 @@ class SimpleNN(nn.Module):
         )
     def forward(self, x): return self.layers(x)
 
-class Attention(nn.Module):
-    def __init__(self, hidden_size):
-        super(Attention, self).__init__()
-        self.hidden_size = hidden_size
-        self.attn = nn.Linear(self.hidden_size, 1)
-        self.softmax = nn.Softmax(dim=1)
-
-    def forward(self, lstm_output):
-        attn_weights = self.attn(lstm_output).squeeze(2)
-        soft_attn_weights = self.softmax(attn_weights)
-        context = torch.bmm(lstm_output.transpose(1, 2), soft_attn_weights.unsqueeze(2)).squeeze(2)
-        return context
-
-class EnhancedNN(nn.Module): # LSTM + Attention
+class EnhancedNN(nn.Module):
     def __init__(self, input_size, hidden_size=64, num_layers=2):
         super(EnhancedNN, self).__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
@@ -136,7 +112,7 @@ def train_pytorch_model(model, X_train, y_train, X_test):
     
     dataset = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
     loader = DataLoader(dataset, batch_size=32, shuffle=True)
-    criterion, optimizer = nn.SmoothL1Loss(), optim.Adam(model.parameters(), lr=0.001) # Use Huber Loss
+    criterion, optimizer = nn.SmoothL1Loss(), optim.Adam(model.parameters(), lr=0.001)
 
     model.train()
     for epoch in range(50):
@@ -152,121 +128,54 @@ def train_pytorch_model(model, X_train, y_train, X_test):
         preds_tensor = model(torch.FloatTensor(X_test).to(device))
     return preds_tensor.cpu().numpy().flatten()
 
-# --- Learned Embedding Model ---
-class LearnedEmbedder(nn.Module):
-    """
-    A simple GRU-based model to create learned embeddings from a time-series window.
-    It acts as a feature extractor.
-    """
-    def __init__(self, input_dim=1, hidden_dim=32, embedding_dim=4, num_layers=2, dropout=0.1):
-        super().__init__()
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-        self.fc = nn.Linear(hidden_dim, embedding_dim)
-
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, input_dim)
-        _, h_n = self.gru(x)
-        # h_n shape: (num_layers, batch_size, hidden_dim)
-        # Get the hidden state of the last layer
-        last_hidden = h_n[-1, :, :]
-        # last_hidden shape: (batch_size, hidden_dim)
-        embedding = self.fc(last_hidden)
-        # embedding shape: (batch_size, embedding_dim)
-        return embedding
-
 # --- Autoencoder Models for Pre-training ---
 class MaskedEncoder(nn.Module):
-    """
-    A powerful, deep encoder that processes a sequence, passes it through a bottleneck,
-    and outputs a single, low-dimensional latent vector representing the entire sequence.
-    """
     def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, final_embedding_dim: int):
         super().__init__()
         self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True
+            input_size=input_dim, hidden_size=hidden_dim, num_layers=num_layers,
+            batch_first=True, bidirectional=True
         )
         self.projection = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim), # Bidirectional GRU output is 2 * hidden_dim
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, final_embedding_dim) # Project to final low-dimensional embedding
+            nn.Linear(hidden_dim, final_embedding_dim)
         )
     
     def forward(self, x):
-        # x shape: (batch_size, seq_len, input_dim)
-        # Get the hidden states from the GRU. We only need the final hidden state.
-        _, h_n = self.gru(x) # h_n shape: (num_layers * 2, batch_size, hidden_dim)
-        
-        # Concatenate the final forward and backward hidden states from the last layer
-        # h_n[-2,:,:] is the last forward hidden state
-        # h_n[-1,:,:] is the last backward hidden state
-        last_hidden = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1) # shape: (batch_size, hidden_dim * 2)
-        
-        # Project this concatenated state to the final embedding dimension
-        embedding = self.projection(last_hidden) # shape: (batch_size, final_embedding_dim)
+        _, h_n = self.gru(x)
+        last_hidden = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1)
+        embedding = self.projection(last_hidden)
         return embedding
 
 class MaskedDecoder(nn.Module):
-    """A powerful decoder that takes a single latent vector and reconstructs the original input sequence."""
     def __init__(self, embedding_dim: int, hidden_dim: int, output_dim: int, seq_len: int, num_layers: int):
         super().__init__()
         self.seq_len = seq_len
-        
-        # An initial layer to expand the latent vector's dimensionality
         self.expansion_fc = nn.Linear(embedding_dim, hidden_dim * 2)
-        
         self.gru = nn.GRU(
-            input_size=hidden_dim * 2, # Input from the expanded latent vector
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True
+            input_size=hidden_dim * 2, hidden_size=hidden_dim,
+            num_layers=num_layers, batch_first=True, bidirectional=True
         )
-        # Final layer to reconstruct the sequence feature-wise
         self.fc = nn.Linear(hidden_dim * 2, output_dim)
 
     def forward(self, x):
-        # x shape: (batch_size, embedding_dim)
-        
-        # 1. Expand the latent vector to a higher dimension
         x_expanded = self.expansion_fc(x)
-        
-        # 2. Repeat this vector for each time step in the sequence to feed the GRU
-        # This creates a (batch_size, seq_len, hidden_dim * 2) tensor
         x_repeated = x_expanded.unsqueeze(1).repeat(1, self.seq_len, 1)
-        
-        # 3. Pass through the GRU to generate the sequence
         outputs, _ = self.gru(x_repeated)
-        
-        # 4. Project the output of each time step to the original feature dimension
-        reconstruction = self.fc(outputs) # shape: (batch_size, seq_len, output_dim)
+        reconstruction = self.fc(outputs)
         return reconstruction
 
 class MaskedTimeSeriesAutoencoder(nn.Module):
-    """Combines the new Encoder and Decoder for pre-training with a bottleneck."""
     def __init__(self, input_dim: int, encoder_hidden_dim: int, encoder_layers: int, decoder_hidden_dim: int, decoder_layers: int, final_embedding_dim: int, seq_len: int):
         super().__init__()
         self.encoder = MaskedEncoder(
-            input_dim=input_dim, 
-            hidden_dim=encoder_hidden_dim, 
-            num_layers=encoder_layers,
+            input_dim=input_dim, hidden_dim=encoder_hidden_dim, num_layers=encoder_layers,
             final_embedding_dim=final_embedding_dim
         )
         self.decoder = MaskedDecoder(
-            embedding_dim=final_embedding_dim, 
-            hidden_dim=decoder_hidden_dim, 
-            output_dim=input_dim, 
-            seq_len=seq_len,
-            num_layers=decoder_layers
+            embedding_dim=final_embedding_dim, hidden_dim=decoder_hidden_dim, 
+            output_dim=input_dim, seq_len=seq_len, num_layers=decoder_layers
         )
 
     def forward(self, x_masked):
@@ -274,147 +183,10 @@ class MaskedTimeSeriesAutoencoder(nn.Module):
         reconstruction = self.decoder(latent_embedding)
         return reconstruction
 
-def pretrain_embedder(df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFrame, window_size: int, config: dict, results_dir: str):
-    """Pre-trains a masked autoencoder with validation and early stopping, and returns the trained ENCODER part."""
-    input_dim = df_to_pretrain_on.shape[1]
-    print(f"  - Preparing data for masked autoencoder pre-training (window: {window_size}, input_dim: {input_dim})...")
-    
-    # --- LEAKAGE FIX: Fit scaler ONLY on designated training data ---
-    scaler = MinMaxScaler()
-    scaler.fit(df_to_scale_on)
-    
-    # Transform the entire dataset for the pre-training process
-    series_scaled = scaler.transform(df_to_pretrain_on)
-    
-    sequences = []
-    for i in range(len(series_scaled) - window_size + 1):
-        sequences.append(series_scaled[i:i+window_size])
-    
-    if not sequences:
-        print("  - ⚠️ Warning: Not enough data for pre-training. Returning untrained encoder.")
-        return MaskedEncoder(input_dim=input_dim, hidden_dim=config['encoder_hidden_dim'], num_layers=config['encoder_layers'], final_embedding_dim=config['final_embedding_dim']), scaler
-
-    # --- Create Training and Validation Sets ---
-    split_idx = int(len(sequences) * 0.8)
-    train_sequences = sequences[:split_idx]
-    val_sequences = sequences[split_idx:]
-    
-    if len(val_sequences) == 0:
-        # Fallback for small datasets where validation set might be empty
-        print("  - ⚠️ Warning: Not enough data for a validation set. Training without early stopping.")
-        train_sequences = sequences
-        val_sequences = [] # Ensure val_loader is empty
-
-    train_dataset = TensorDataset(torch.FloatTensor(np.array(train_sequences)))
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-    
-    val_loader = None
-    if val_sequences:
-        val_dataset = TensorDataset(torch.FloatTensor(np.array(val_sequences)))
-        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    autoencoder = MaskedTimeSeriesAutoencoder(
-        input_dim=input_dim,
-        encoder_hidden_dim=config['encoder_hidden_dim'],
-        encoder_layers=config['encoder_layers'],
-        decoder_hidden_dim=config['decoder_hidden_dim'],
-        decoder_layers=config['decoder_layers'],
-        final_embedding_dim=config['final_embedding_dim'],
-        seq_len=window_size
-    ).to(device)
-    criterion = nn.SmoothL1Loss() # Use Huber Loss for robustness to outliers
-    optimizer = optim.Adam(autoencoder.parameters(), lr=config['learning_rate'])
-
-    print(f"  - Pre-training Masked Autoencoder on {len(train_dataset)} sequences for up to {config['epochs']} epochs...")
-
-    best_val_loss = float('inf')
-    epochs_no_improve = 0
-    best_model_state = None
-
-    for epoch in range(config['epochs']):
-        # --- Training Phase ---
-        autoencoder.train()
-        train_loss = 0
-        for i, (batch,) in enumerate(train_loader):
-            batch = batch.to(device)
-            optimizer.zero_grad()
-            
-            # Masking logic
-            noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
-            unmasked_indices = noise > config['mask_ratio']
-            x_masked_input = batch.clone()
-            x_masked_input[~unmasked_indices] = 0
-            
-            reconstruction = autoencoder(x_masked_input)
-            
-            # Calculate loss ONLY on masked elements
-            loss_mask = ~unmasked_indices
-            loss = criterion(reconstruction[loss_mask], batch[loss_mask])
-            
-            if torch.isfinite(loss):
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-        
-        avg_train_loss = train_loss / (i + 1) if i > 0 else train_loss
-        
-        # --- Validation Phase ---
-        if val_loader:
-            autoencoder.eval()
-            val_loss = 0
-            with torch.no_grad():
-                for i, (batch,) in enumerate(val_loader):
-                    batch = batch.to(device)
-                    noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
-                    unmasked_indices = noise > config['mask_ratio']
-                    x_masked_input = batch.clone()
-                    x_masked_input[~unmasked_indices] = 0
-                    
-                    reconstruction = autoencoder(x_masked_input)
-                    
-                    loss_mask = ~unmasked_indices
-                    loss = criterion(reconstruction[loss_mask], batch[loss_mask])
-                    
-                    if torch.isfinite(loss):
-                        val_loss += loss.item()
-
-            avg_val_loss = val_loss / (i + 1) if i > 0 else val_loss
-            print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
-
-            # --- Early Stopping Check ---
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                epochs_no_improve = 0
-                best_model_state = autoencoder.state_dict()
-                # print(f"      -> New best val_loss: {best_val_loss:.6f}")
-            else:
-                epochs_no_improve += 1
-            
-            if epochs_no_improve >= config['patience']:
-                print(f"    -- Early stopping triggered after {config['patience']} epochs. --")
-                break
-        else: # No validation set
-            if (epoch + 1) % 10 == 0:
-                print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}")
-    
-    # Load the best model if early stopping was used
-    if best_model_state:
-        autoencoder.load_state_dict(best_model_state)
-    
-    # Visualize final reconstruction
-    visualize_autoencoder_reconstruction(autoencoder.to('cpu'), train_loader, scaler, results_dir, config['mask_ratio'])
-
-    return autoencoder.encoder.to("cpu"), scaler
-
 def visualize_autoencoder_reconstruction(model, data_loader, scaler, results_dir, mask_ratio, n_samples=3):
-    """
-    Visualizes how well the autoencoder reconstructs the original time-series data.
-    """
     model.eval()
     original_seqs_tensor = next(iter(data_loader))[0][:n_samples]
     
-    # Create mask for visualization
     torch.manual_seed(42)
     noise = torch.rand(original_seqs_tensor.shape[0], original_seqs_tensor.shape[1])
     unmasked_indices = noise > mask_ratio
@@ -429,9 +201,7 @@ def visualize_autoencoder_reconstruction(model, data_loader, scaler, results_dir
     
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, axes = plt.subplots(nrows=n_samples, ncols=1, figsize=(15, 5 * n_samples), sharex=True)
-    if n_samples == 1:
-        axes = [axes]
-
+    if n_samples == 1: axes = [axes]
     fig.suptitle('Masked Autoencoder Pre-training: Original vs. Reconstructed', fontsize=16)
 
     for i in range(n_samples):
@@ -452,12 +222,37 @@ def visualize_autoencoder_reconstruction(model, data_loader, scaler, results_dir
 
     plt.xlabel('Time Step in Window')
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-    
     plot_path = os.path.join(results_dir, "autoencoder_reconstruction.png")
     plt.savefig(plot_path)
     print(f"✅ Autoencoder reconstruction plot saved to {plot_path}")
     plt.close(fig)
 
+# --- Probe & Evaluation ---
+def probe_feature_set(df: pd.DataFrame, target_col: str):
+    df_feat = df.drop(columns=['date', target_col]).dropna()
+    y = df.loc[df_feat.index][target_col]
+    X = df_feat
+
+    if X.empty or y.empty or len(X) < 20:
+        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": 0}
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+    if len(X_train) < 1 or len(X_test) < 1:
+        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": X.shape[1]}
+
+    lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=50, verbosity=-1, n_jobs=1)
+    lgb_model.fit(X_train, y_train)
+    preds_lgbm = lgb_model.predict(X_test)
+    score_lgbm = r2_score(y_test, preds_lgbm)
+
+    scaler_x = MinMaxScaler()
+    X_train_s = scaler_x.fit_transform(X_train)
+    X_test_s = scaler_x.transform(X_test)
+    scaler_y = MinMaxScaler()
+    y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
+    nn_model = SimpleNN(X_train.shape[1])
+    preds_nn_scaled = train_pytorch_model(nn_model, X_train_s, y_train_s, X_test_s)
 # --- NEW: Self-Supervised Probe Model ---
 class DynamicProbeModel(nn.Module):
     """
@@ -812,7 +607,11 @@ class TLAFS_Algorithm:
         self.results_dir = results_dir
         self.experience_buffer = ExperienceReplayBuffer(capacity=20)
         
-        # --- NEW: Multi-scale Embeddings Pre-training ---
+        # --- NEW: Centralized model initialization and pre-training ---
+        self._initialize_and_pretrain_models()
+
+    def _initialize_and_pretrain_models(self):
+        """A new private method to handle all model pre-training and setup."""
         print("\nEnriching data with time features for a smarter autoencoder...")
         self.base_df['dayofweek'] = self.base_df['date'].dt.dayofweek
         self.base_df['month'] = self.base_df['date'].dt.month
@@ -820,131 +619,27 @@ class TLAFS_Algorithm:
         self.base_df['is_weekend'] = (self.base_df['date'].dt.dayofweek >= 5).astype(int)
         
         TLAFS_Algorithm.pretrain_cols_static = [self.target_col, 'dayofweek', 'month', 'weekofyear', 'is_weekend']
-        df_for_pretraining = self.base_df[TLAFS_Algorithm.pretrain_cols_static]
-        print(f"Autoencoder will be trained on features: {TLAFS_Algorithm.pretrain_cols_static}")
-
-        # --- LEAKAGE FIX: Define a strict training set for fitting scalers ---
-        train_size = int(len(df_for_pretraining) * 0.8)
-        df_for_scaling = df_for_pretraining.iloc[:train_size]
-        print(f"Scalers for embeddings will be fit on the first {train_size} rows to prevent data leakage.")
-
-        print("\n🧠 Pre-training or LOADING MULTI-SCALE Masked Autoencoders...")
+        TLAFS_Algorithm.target_col_static = self.target_col  # 添加缺失的类属性
         
-        # --- NEW: Logic to save/load pre-trained models ---
         pretrained_models_dir = "pretrained_models"
         os.makedirs(pretrained_models_dir, exist_ok=True)
         
-        self.pretrained_encoders = {}
-        self.embedder_scalers = {}
-        embedding_window_sizes = [90, 365, 730]
-        input_dim = len(TLAFS_Algorithm.pretrain_cols_static)
-
-        pretrain_config = {
-            'encoder_hidden_dim': 256, 'encoder_layers': 4,
-            'decoder_hidden_dim': 128, 'decoder_layers': 2,
-            'final_embedding_dim': 64, # The new bottleneck dimension
-            'epochs': 100, 'batch_size': 64, 'patience': 15,
-            'learning_rate': 0.001, 'mask_ratio': 0.4
+        print("\n🧠 Setting up PROBE FORECASTER model...")
+        self.probe_model_path = os.path.join(pretrained_models_dir, "probe_forecaster.pth")
+        self.probe_config = {
+            'seq_len': 365, 'd_model': 64, 'nhead': 4, 'num_agents': 8,
+            'num_lags': 14, 'epochs': 150, 'patience': 25, 'batch_size': 32,
+            'learning_rate': 0.0005
         }
-        
-        for window_size in embedding_window_sizes:
-            encoder_path = os.path.join(pretrained_models_dir, f"encoder_ws{window_size}.pth")
-            scaler_path = os.path.join(pretrained_models_dir, f"scaler_ws{window_size}.joblib")
-
-            if os.path.exists(encoder_path) and os.path.exists(scaler_path):
-                print(f"\n--- Loading pre-trained model for window size: {window_size} days ---")
-                encoder = MaskedEncoder(
-                    input_dim=input_dim,
-                    hidden_dim=pretrain_config['encoder_hidden_dim'],
-                    num_layers=pretrain_config['encoder_layers'],
-                    final_embedding_dim=pretrain_config['final_embedding_dim']
-                )
-                encoder.load_state_dict(torch.load(encoder_path))
-                encoder.eval() # Set to evaluation mode
-                scaler = joblib.load(scaler_path)
-                
-                self.pretrained_encoders[window_size] = encoder
-                self.embedder_scalers[window_size] = scaler
-                print(f"   ✅ Loaded encoder and scaler from {pretrained_models_dir}")
-            else:
-                print(f"\n--- No pre-trained model found. Training for window size: {window_size} days ---")
-                encoder, scaler = pretrain_embedder(
-                    df_for_pretraining,       # The AE can learn patterns from all data
-                    df_for_scaling,           # But the scaler is ONLY fit on the training portion
-                    window_size=window_size,
-                    config=pretrain_config,
-                    results_dir=self.results_dir
-                )
-                
-                # Save the newly trained model and scaler for future runs
-                torch.save(encoder.state_dict(), encoder_path)
-                joblib.dump(scaler, scaler_path)
-                print(f"   ✅ Pre-training complete. Saved new encoder and scaler to {pretrained_models_dir}")
-                
-                self.pretrained_encoders[window_size] = encoder
-                self.embedder_scalers[window_size] = scaler
-        
-        # Add static dictionaries for the static method to use
-        TLAFS_Algorithm.pretrained_encoders = self.pretrained_encoders
-        TLAFS_Algorithm.embedder_scalers = self.embedder_scalers
-        TLAFS_Algorithm.target_col_static = self.target_col
-
-        print("\n🧠 Pre-training or LOADING RESIDUAL Autoencoder...")
-        residual_encoder_path = os.path.join(pretrained_models_dir, "residual_encoder.pth")
-        residual_scaler_path = os.path.join(pretrained_models_dir, "residual_scaler.joblib")
-        TLAFS_Algorithm.residual_embedding_window = 365 # Hardcode for simplicity
-
-        # --- 1. Create the residual signals for pre-training ---
-        df_for_residuals = self.base_df[[self.target_col]].copy()
-        # High-res model (captures details, leaves trend/seasonality in residuals)
-        high_res_pred = df_for_residuals[self.target_col].shift(1)
-        # Low-res model (captures trend, leaves details in residuals)
-        low_res_pred = df_for_residuals[self.target_col].rolling(window=90, min_periods=1).mean().shift(1)
-
-        # Calculate residuals (the "meta-features")
-        df_for_residuals['high_freq_residuals'] = df_for_residuals[self.target_col] - low_res_pred
-        df_for_residuals['low_freq_residuals'] = df_for_residuals[self.target_col] - high_res_pred
-        df_for_residuals = df_for_residuals[['high_freq_residuals', 'low_freq_residuals']].fillna(0)
-
-        # The autoencoder for residuals has input_dim=2
-        residual_input_dim = 2
-
-        if os.path.exists(residual_encoder_path) and os.path.exists(residual_scaler_path):
-            print(f"\n--- Loading pre-trained RESIDUAL model ---")
-            residual_encoder = MaskedEncoder(
-                input_dim=residual_input_dim,
-                hidden_dim=pretrain_config['encoder_hidden_dim'],
-                num_layers=pretrain_config['encoder_layers'],
-                final_embedding_dim=pretrain_config['final_embedding_dim']
-            )
-            residual_encoder.load_state_dict(torch.load(residual_encoder_path))
-            residual_encoder.eval()
-            residual_scaler = joblib.load(residual_scaler_path)
-            
-            self.residual_encoder = residual_encoder
-            self.residual_scaler = residual_scaler
-            print(f"   ✅ Loaded residual encoder and scaler from {pretrained_models_dir}")
+        if not os.path.exists(self.probe_model_path):
+             print(f"  -> ProbeForecaster model not found. It will be trained if needed by dependent models.")
         else:
-            print(f"\n--- No pre-trained RESIDUAL model found. Training now... ---")
-            # Use the same pre-training config, but on the 2-column residual data
-            residual_encoder, residual_scaler = pretrain_embedder(
-                df_for_residuals,
-                df_for_residuals.iloc[:train_size], # Use same train split for scaler fitting
-                window_size=TLAFS_Algorithm.residual_embedding_window,
-                config=pretrain_config,
-                results_dir=self.results_dir
-            )
-            
-            torch.save(residual_encoder.state_dict(), residual_encoder_path)
-            joblib.dump(residual_scaler, residual_scaler_path)
-            print(f"   ✅ Pre-training complete. Saved new residual encoder and scaler.")
-            
-            self.residual_encoder = residual_encoder
-            self.residual_scaler = residual_scaler
-
-        # Add static dictionaries for the static method to use
-        TLAFS_Algorithm.residual_encoder = self.residual_encoder
-        TLAFS_Algorithm.residual_scaler = self.residual_scaler
+             print(f"  -> Found pre-trained ProbeForecaster model at {self.probe_model_path}")
+        
+        TLAFS_Algorithm.probe_config = self.probe_config
+        TLAFS_Algorithm.probe_model_path = self.probe_model_path
+        
+        self.pretrain_all_embedders()
 
         print("\n🧠 Pre-training Meta-Forecast Models...")
         self.meta_forecast_models = {}
@@ -958,11 +653,9 @@ class TLAFS_Algorithm:
         X_meta = df_for_meta[meta_features].values
         y_meta = df_for_meta[[self.target_col]].values
         
-        # Split data for meta-model training
         train_size_meta = int(len(X_meta) * 0.8)
         X_train_meta, y_train_meta = X_meta[:train_size_meta], y_meta[:train_size_meta]
         
-        # Scale features
         scaler_x_meta = MinMaxScaler()
         X_train_meta_s = scaler_x_meta.fit_transform(X_train_meta)
         
@@ -977,7 +670,6 @@ class TLAFS_Algorithm:
         
         for name, model in models_to_train.items():
             print(f"  - Training {name}...")
-            # Simplified training loop
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model.to(device)
             dataset = TensorDataset(torch.FloatTensor(X_train_meta_s), torch.FloatTensor(y_train_meta_s))
@@ -985,7 +677,7 @@ class TLAFS_Algorithm:
             criterion, optimizer = nn.SmoothL1Loss(), optim.Adam(model.parameters(), lr=0.001)
 
             model.train()
-            for epoch in range(30): # shorter training for these meta models
+            for epoch in range(30):
                 for inputs, targets in loader:
                     optimizer.zero_grad()
                     outputs = model(inputs.to(device))
@@ -995,12 +687,314 @@ class TLAFS_Algorithm:
             model.eval()
             self.meta_forecast_models[name] = model.to('cpu')
         
-        # Store scalers for use in execute_plan
         self.meta_scalers = {'x': scaler_x_meta, 'y': scaler_y_meta}
-        
-        # Make them available to static method
         TLAFS_Algorithm.meta_forecast_models = self.meta_forecast_models
         TLAFS_Algorithm.meta_scalers = self.meta_scalers
+
+    def pretrain_embedder(self, df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFrame, window_size: int, config: dict):
+        """Pre-trains a masked autoencoder with validation and early stopping, and returns the trained ENCODER part."""
+        
+        # --- NEW: Load the ProbeForecaster to be used for Perceptual Loss ---
+        print("  - 检查ProbeForecaster模型是否可用...")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        probe_model_path = self.probe_model_path
+        use_perceptual_loss = os.path.exists(probe_model_path)
+        
+        if use_perceptual_loss:
+            print("  - 加载ProbeForecaster进行感知损失计算...")
+            probe_config = self.probe_config # Use the instance config
+            
+            # We only need the attention probe part of the forecaster
+            perceptual_model = AgentAttentionProbe(
+                d_model=probe_config['d_model'],
+                nhead=probe_config['nhead'],
+                num_agents=probe_config['num_agents']
+            ).to(device)
+            
+            # We need the full forecaster to load the state dict, then we extract the probe
+            full_probe_forecaster_model = ProbeForecaster(
+                input_dim=3, # temp, dayofweek, month - 这是ProbeForecaster的输入维度
+                d_model=probe_config['d_model'],
+                nhead=probe_config['nhead'],
+                num_agents=probe_config['num_agents'],
+                num_lags=probe_config['num_lags'],
+                num_exog=2 # dayofweek, month
+            ).to(device)
+            full_probe_forecaster_model.load_state_dict(torch.load(probe_model_path))
+            
+            # Transfer the learned weights to our perceptual model instance
+            perceptual_model.load_state_dict(full_probe_forecaster_model.attention_probe.state_dict())
+            perceptual_model.eval() # Set to evaluation mode, freeze weights
+            
+            # We also need the input embedding layer from the forecaster
+            input_embed_layer = full_probe_forecaster_model.input_embedding.to(device)
+            input_embed_layer.eval()
+
+            # We also need the positional encoding
+            pos_encoder = PositionalEncoding(d_model=probe_config['d_model']).to(device)
+        else:
+            print("  - ProbeForecaster模型未找到，将使用基础重建损失进行训练")
+            perceptual_model = None
+            input_embed_layer = None
+            pos_encoder = None
+
+
+        input_dim = df_to_pretrain_on.shape[1]
+        print(f"  - Preparing data for masked autoencoder pre-training (window: {window_size}, input_dim: {input_dim})...")
+        
+        # --- LEAKAGE FIX: Fit scaler ONLY on designated training data ---
+        scaler = MinMaxScaler()
+        scaler.fit(df_to_scale_on)
+        
+        # Transform the entire dataset for the pre-training process
+        series_scaled = scaler.transform(df_to_pretrain_on)
+        
+        sequences = []
+        for i in range(len(series_scaled) - window_size + 1):
+            sequences.append(series_scaled[i:i+window_size])
+        
+        if not sequences:
+            print("  - ⚠️ Warning: Not enough data for pre-training. Returning untrained encoder.")
+            return MaskedEncoder(input_dim=input_dim, hidden_dim=config['encoder_hidden_dim'], num_layers=config['encoder_layers'], final_embedding_dim=config['final_embedding_dim']), scaler
+
+        # --- Create Training and Validation Sets ---
+        split_idx = int(len(sequences) * 0.8)
+        train_sequences = sequences[:split_idx]
+        val_sequences = sequences[split_idx:]
+        
+        if len(val_sequences) == 0:
+            # Fallback for small datasets where validation set might be empty
+            print("  - ⚠️ Warning: Not enough data for a validation set. Training without early stopping.")
+            train_sequences = sequences
+            val_sequences = [] # Ensure val_loader is empty
+
+        train_dataset = TensorDataset(torch.FloatTensor(np.array(train_sequences)))
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
+        
+        val_loader = None
+        if val_sequences:
+            val_dataset = TensorDataset(torch.FloatTensor(np.array(val_sequences)))
+            val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
+
+        autoencoder = MaskedTimeSeriesAutoencoder(
+            input_dim=input_dim,
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            encoder_layers=config['encoder_layers'],
+            decoder_hidden_dim=config['decoder_hidden_dim'],
+            decoder_layers=config['decoder_layers'],
+            final_embedding_dim=config['final_embedding_dim'],
+            seq_len=window_size
+        ).to(device)
+        criterion_recon = nn.SmoothL1Loss() # Reconstruction Loss
+        criterion_perceptual = nn.MSELoss() # Perceptual Loss
+        optimizer = optim.Adam(autoencoder.parameters(), lr=config['learning_rate'])
+
+        print(f"  - Pre-training Masked Autoencoder on {len(train_dataset)} sequences for up to {config['epochs']} epochs...")
+        if use_perceptual_loss:
+            print("  - 使用混合损失: 重建损失 + 感知损失 (来自ProbeForecaster)")
+        else:
+            print("  - 使用基础重建损失进行训练")
+
+        best_val_loss = float('inf')
+        epochs_no_improve = 0
+        best_model_state = None
+
+        for epoch in range(config['epochs']):
+            # --- Training Phase ---
+            autoencoder.train()
+            train_loss = 0
+            for i, (batch,) in enumerate(train_loader):
+                batch = batch.to(device)
+                optimizer.zero_grad()
+                
+                # Masking logic
+                noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
+                unmasked_indices = noise > config['mask_ratio']
+                x_masked_input = batch.clone()
+                x_masked_input[~unmasked_indices] = 0
+                
+                reconstruction = autoencoder(x_masked_input)
+                
+                # --- LOSS CALCULATION (Now with Perceptual Loss) ---
+                loss_mask = ~unmasked_indices
+                
+                # 1. Standard Reconstruction Loss (on masked parts)
+                loss_r = criterion_recon(reconstruction[loss_mask], batch[loss_mask])
+
+                # 2. Perceptual Loss (only if available)
+                if use_perceptual_loss and perceptual_model is not None:
+                    with torch.no_grad(): # Ensure no gradients are computed for the perceptual model
+                        # The perceptual model expects a window of 365. We must slice our batch.
+                        if window_size >= 365:
+                            # To pass to the perceptual model, we need to embed the sequence first
+                            # The perceptual model works on the 'temp' column primarily.
+                            # This is a simplification. A more complex implementation would handle multiple features.
+                            
+                            # ProbeForecaster期望3个特征: temp, dayofweek, month
+                            # 我们需要从batch中提取这3个特征（假设它们在前3列）
+                            original_seq_for_perceptual = batch[:, -365:, :3] # Shape: (batch, 365, 3)
+                            recon_seq_for_perceptual = torch.cat([
+                                reconstruction[:, -365:, 0:1],  # temp (重建的)
+                                batch[:, -365:, 1:3]           # dayofweek, month (原始的，因为这些不需要重建)
+                            ], dim=-1) # Shape: (batch, 365, 3)
+                            
+                            # Embed and add positional encoding
+                            original_embedded = pos_encoder(input_embed_layer(original_seq_for_perceptual))
+                            recon_embedded = pos_encoder(input_embed_layer(recon_seq_for_perceptual))
+
+                            # Get feature embeddings from the probe
+                            original_features = perceptual_model(original_embedded)
+                            recon_features = perceptual_model(recon_embedded)
+                            
+                            loss_p = criterion_perceptual(recon_features, original_features)
+                        else:
+                            loss_p = 0.0 # Cannot compute if window is too small
+                    
+                    # 3. Combine losses with perceptual component
+                    perceptual_weight = 0.5 # Hyperparameter to balance the two losses
+                    loss = (1 - perceptual_weight) * loss_r + perceptual_weight * loss_p
+                else:
+                    # 3. Use only reconstruction loss
+                    loss = loss_r
+
+                if torch.isfinite(loss):
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item()
+            
+            avg_train_loss = train_loss / (i + 1) if i > 0 else train_loss
+            
+            # --- Validation Phase ---
+            if val_loader:
+                autoencoder.eval()
+                val_loss = 0
+                with torch.no_grad():
+                    for i, (batch,) in enumerate(val_loader):
+                        batch = batch.to(device)
+                        noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
+                        unmasked_indices = noise > config['mask_ratio']
+                        x_masked_input = batch.clone()
+                        x_masked_input[~unmasked_indices] = 0
+                        
+                        reconstruction = autoencoder(x_masked_input)
+                        
+                        loss_mask = ~unmasked_indices
+                        
+                        # --- Validation Loss Calculation (Hybrid or Basic) ---
+                        loss_r_val = criterion_recon(reconstruction[loss_mask], batch[loss_mask])
+
+                        if use_perceptual_loss and perceptual_model is not None:
+                            if window_size >= 365:
+                                original_seq_for_perceptual = batch[:, -365:, :3] # Shape: (batch, 365, 3)
+                                recon_seq_for_perceptual = torch.cat([
+                                    reconstruction[:, -365:, 0:1],  # temp (重建的)
+                                    batch[:, -365:, 1:3]           # dayofweek, month (原始的)
+                                ], dim=-1) # Shape: (batch, 365, 3)
+                                original_embedded = pos_encoder(input_embed_layer(original_seq_for_perceptual))
+                                recon_embedded = pos_encoder(input_embed_layer(recon_seq_for_perceptual))
+                                original_features = perceptual_model(original_embedded)
+                                recon_features = perceptual_model(recon_embedded)
+                                loss_p_val = criterion_perceptual(recon_features, original_features)
+                            else:
+                                loss_p_val = 0.0
+
+                            loss = (1 - perceptual_weight) * loss_r_val + perceptual_weight * loss_p_val
+                        else:
+                            loss = loss_r_val
+
+                        if torch.isfinite(loss):
+                            val_loss += loss.item()
+
+                avg_val_loss = val_loss / (i + 1) if i > 0 else val_loss
+                print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+
+                # --- Early Stopping Check ---
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    epochs_no_improve = 0
+                    best_model_state = autoencoder.state_dict()
+                    # print(f"      -> New best val_loss: {best_val_loss:.6f}")
+                else:
+                    epochs_no_improve += 1
+                
+                if epochs_no_improve >= config['patience']:
+                    print(f"    -- Early stopping triggered after {config['patience']} epochs. --")
+                    break
+            else: # No validation set
+                if (epoch + 1) % 10 == 0:
+                    print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}")
+        
+        # Load the best model if early stopping was used
+        if best_model_state:
+            autoencoder.load_state_dict(best_model_state)
+        
+        # Visualize final reconstruction
+        visualize_autoencoder_reconstruction(autoencoder.to('cpu'), train_loader, scaler, self.results_dir, config['mask_ratio'])
+
+        return autoencoder.encoder.to("cpu"), scaler
+
+    def pretrain_all_embedders(self):
+        """A new wrapper method to handle the logic that was in __init__."""
+        print("\n🧠 Pre-training or LOADING MULTI-SCALE Masked Autoencoders...")
+        
+        pretrained_models_dir = "pretrained_models"
+        os.makedirs(pretrained_models_dir, exist_ok=True)
+        
+        self.pretrained_encoders = {}
+        self.embedder_scalers = {}
+        embedding_window_sizes = [90, 365, 730]
+        input_dim = len(TLAFS_Algorithm.pretrain_cols_static)
+
+        pretrain_config = {
+            'encoder_hidden_dim': 256, 'encoder_layers': 4,
+            'decoder_hidden_dim': 128, 'decoder_layers': 2,
+            'final_embedding_dim': 64, 
+            'epochs': 100, 'batch_size': 64, 'patience': 15,
+            'learning_rate': 0.001, 'mask_ratio': 0.4
+        }
+
+        df_for_pretraining = self.base_df[TLAFS_Algorithm.pretrain_cols_static]
+        train_size = int(len(df_for_pretraining) * 0.8)
+        df_for_scaling = df_for_pretraining.iloc[:train_size]
+        
+        for window_size in embedding_window_sizes:
+            encoder_path = os.path.join(pretrained_models_dir, f"encoder_ws{window_size}.pth")
+            scaler_path = os.path.join(pretrained_models_dir, f"scaler_ws{window_size}.joblib")
+
+            if os.path.exists(encoder_path) and os.path.exists(scaler_path):
+                print(f"\n--- Loading pre-trained model for window size: {window_size} days ---")
+                encoder = MaskedEncoder(
+                    input_dim=input_dim,
+                    hidden_dim=pretrain_config['encoder_hidden_dim'],
+                    num_layers=pretrain_config['encoder_layers'],
+                    final_embedding_dim=pretrain_config['final_embedding_dim']
+                )
+                encoder.load_state_dict(torch.load(encoder_path))
+                encoder.eval() 
+                scaler = joblib.load(scaler_path)
+                
+                self.pretrained_encoders[window_size] = encoder
+                self.embedder_scalers[window_size] = scaler
+                print(f"   ✅ Loaded encoder and scaler from {pretrained_models_dir}")
+            else:
+                print(f"\n--- No pre-trained model found. Training for window size: {window_size} days ---")
+                encoder, scaler = self.pretrain_embedder( # Call the method
+                    df_for_pretraining,       
+                    df_for_scaling,           
+                    window_size=window_size,
+                    config=pretrain_config
+                )
+                
+                torch.save(encoder.state_dict(), encoder_path)
+                joblib.dump(scaler, scaler_path)
+                print(f"   ✅ Pre-training complete. Saved new encoder and scaler to {pretrained_models_dir}")
+                
+                self.pretrained_encoders[window_size] = encoder
+                self.embedder_scalers[window_size] = scaler
+
+        TLAFS_Algorithm.pretrained_encoders = self.pretrained_encoders
+        TLAFS_Algorithm.embedder_scalers = self.embedder_scalers
 
     @staticmethod
     def summarize_feature_list(features: list) -> list:
@@ -1257,6 +1251,14 @@ class TLAFS_Algorithm:
                     else:
                         print(f"  - ⚠️ Forecast model '{model_name}' not found. Skipping.")
                 
+                elif op == "create_probe_features":
+                    print("  - Generating probe features from pre-trained model...")
+                    config = TLAFS_Algorithm.probe_config
+                    model_path = TLAFS_Algorithm.probe_model_path
+                    # This function takes the df, adds features, and returns the new df
+                    temp_df = generate_probe_features(temp_df, config, model_path)
+                    print("  - ✅ Probe features generated.")
+
                 elif op == "delete_feature":
                     feature_to_delete = step.get("feature")
 
@@ -1314,15 +1316,21 @@ The target column is '{self.target_col}'.
 
 # 2. Meta-Forecast Features
 - {{"operation": "create_forecast_feature", "model_name": ["SimpleNN_meta", "EnhancedNN_meta"], "id": "UNIQUE_ID"}}
+
+# 3. Attention Probe Features (NEW & EXTREMELY POWERFUL)
+# This generates 512 features from a 365-day lookback window using an attention-based probe.
+# Use this to capture complex annual seasonality and long-term dependencies.
+- {{"operation": "create_probe_features"}}
 """
         # --- Rules ---
         rules = """
 *** RULES ***
-- IDs must be unique. Do not reuse IDs from "Available Features".
+- IDs must be unique. Do not reuse IDs from "Available Features". `create_probe_features` automatically creates features named 'probe_feat_0' to 'probe_feat_511'. Do not try to assign an ID to it.
 - Propose short plans (1-3 steps).
 - For parameters shown with a list of options (e.g., "window": [90, 365]), you MUST CHOOSE ONLY ONE value (e.g., "window": 365). DO NOT return a list for the value.
 - `create_learned_embedding` is very powerful. Try interacting it with other features using `create_interaction`.
-- Do not try to compress `learned_embedding` features; use them directly.
+- `create_probe_features` is the most advanced tool. It is computationally expensive but captures deep patterns. Use it when you need to understand long-term effects.
+- Do not try to compress `learned_embedding` or `probe_features` features; use them directly.
 """
 
         system_prompt = base_prompt
