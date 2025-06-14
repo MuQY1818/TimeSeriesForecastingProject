@@ -1,0 +1,212 @@
+{
+    "run_mode": "re-evaluation",
+    "source_plan_file": "results/run_2025-06-14_14-07-22/tlafs_results_probe_FinalSearch_LGBM_Probe.json",
+    "probe_model": "FinalSearch_LGBM_Probe",
+    "best_score_during_search": "N/A (Re-evaluation mode)",
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 365.25,
+            "order": 2,
+            "id": "F_Yearly"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "window": 7,
+            "on": "temp",
+            "id": "RollingMean_Week"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "dayofweek",
+                "is_weekend"
+            ],
+            "id": "Interaction_Day_Weekend"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 90,
+            "id": "LE_Quarterly"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "month",
+                "is_weekend"
+            ],
+            "id": "Interaction_Month_Weekend"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "window": 30,
+            "on": "temp",
+            "id": "RollingMean_Month"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 182.625,
+            "order": 2,
+            "id": "F_SemiAnnual"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "weekofyear",
+                "dayofweek"
+            ],
+            "id": "Interaction_Week_Day"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "fourier_sin_1_365",
+        "fourier_cos_1_365",
+        "fourier_sin_2_365",
+        "fourier_cos_2_365",
+        "temp_RollingMean_Week",
+        "dayofweek_x_is_weekend_Interaction_Day_Weekend",
+        "embed_0_LE_Quarterly",
+        "embed_1_LE_Quarterly",
+        "embed_2_LE_Quarterly",
+        "embed_3_LE_Quarterly",
+        "embed_4_LE_Quarterly",
+        "embed_5_LE_Quarterly",
+        "embed_6_LE_Quarterly",
+        "embed_7_LE_Quarterly",
+        "embed_8_LE_Quarterly",
+        "embed_9_LE_Quarterly",
+        "embed_10_LE_Quarterly",
+        "embed_11_LE_Quarterly",
+        "embed_12_LE_Quarterly",
+        "embed_13_LE_Quarterly",
+        "embed_14_LE_Quarterly",
+        "embed_15_LE_Quarterly",
+        "embed_16_LE_Quarterly",
+        "embed_17_LE_Quarterly",
+        "embed_18_LE_Quarterly",
+        "embed_19_LE_Quarterly",
+        "embed_20_LE_Quarterly",
+        "embed_21_LE_Quarterly",
+        "embed_22_LE_Quarterly",
+        "embed_23_LE_Quarterly",
+        "embed_24_LE_Quarterly",
+        "embed_25_LE_Quarterly",
+        "embed_26_LE_Quarterly",
+        "embed_27_LE_Quarterly",
+        "embed_28_LE_Quarterly",
+        "embed_29_LE_Quarterly",
+        "embed_30_LE_Quarterly",
+        "embed_31_LE_Quarterly",
+        "month_x_is_weekend_Interaction_Month_Weekend",
+        "embed_0_LE_Yearly",
+        "embed_1_LE_Yearly",
+        "embed_2_LE_Yearly",
+        "embed_3_LE_Yearly",
+        "embed_4_LE_Yearly",
+        "embed_5_LE_Yearly",
+        "embed_6_LE_Yearly",
+        "embed_7_LE_Yearly",
+        "embed_8_LE_Yearly",
+        "embed_9_LE_Yearly",
+        "embed_10_LE_Yearly",
+        "embed_11_LE_Yearly",
+        "embed_12_LE_Yearly",
+        "embed_13_LE_Yearly",
+        "embed_14_LE_Yearly",
+        "embed_15_LE_Yearly",
+        "embed_16_LE_Yearly",
+        "embed_17_LE_Yearly",
+        "embed_18_LE_Yearly",
+        "embed_19_LE_Yearly",
+        "embed_20_LE_Yearly",
+        "embed_21_LE_Yearly",
+        "embed_22_LE_Yearly",
+        "embed_23_LE_Yearly",
+        "embed_24_LE_Yearly",
+        "embed_25_LE_Yearly",
+        "embed_26_LE_Yearly",
+        "embed_27_LE_Yearly",
+        "embed_28_LE_Yearly",
+        "embed_29_LE_Yearly",
+        "embed_30_LE_Yearly",
+        "embed_31_LE_Yearly",
+        "temp_RollingMean_Month",
+        "fourier_sin_1_182",
+        "fourier_cos_1_182",
+        "fourier_sin_2_182",
+        "fourier_cos_2_182",
+        "weekofyear_x_dayofweek_Interaction_Week_Day"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.4322103165381782,
+            "mae": 30472.20751749683,
+            "rmse": 66797.90730170482
+        },
+        "RandomForest": {
+            "r2": 0.3612141170236204,
+            "mae": 32034.28905370844,
+            "rmse": 70851.12703575086
+        },
+        "XGBoost": {
+            "r2": 0.21862277134383912,
+            "mae": 36610.13980578644,
+            "rmse": 78360.91228136717
+        },
+        "CatBoost": {
+            "r2": 0.36947993514599686,
+            "mae": 31759.310132186696,
+            "rmse": 70391.2315994595
+        },
+        "TabNet": {
+            "r2": -0.896456248339716,
+            "mae": 83956.2063336653,
+            "rmse": 122078.8760154366
+        },
+        "SimpleNN": {
+            "r2": 0.30772983245605223,
+            "mae": 34447.134131234016,
+            "rmse": 73757.6237257808
+        },
+        "EnhancedNN": {
+            "r2": 0.32380653173698504,
+            "mae": 34390.613101422634,
+            "rmse": 72896.15034859421
+        },
+        "Transformer": {
+            "r2": 0.3143673340093621,
+            "mae": 31968.921510350065,
+            "rmse": 73403.17721201881
+        }
+    },
+    "best_final_model": {
+        "name": "LightGBM",
+        "metrics": {
+            "r2": 0.4322103165381782,
+            "mae": 30472.20751749683,
+            "rmse": 66797.90730170482
+        }
+    },
+    "run_history": "N/A (Re-evaluation mode)"
+}

@@ -1,0 +1,455 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_LGBM_Probe",
+    "best_score_during_search": 0.41179877150878597,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 365.25,
+            "order": 2,
+            "id": "F_Yearly"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "window": 7,
+            "on": "temp",
+            "id": "RollingMean_Week"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "dayofweek",
+                "is_weekend"
+            ],
+            "id": "Interaction_Day_Weekend"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 90,
+            "id": "LE_Quarterly"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "month",
+                "is_weekend"
+            ],
+            "id": "Interaction_Month_Weekend"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "window": 30,
+            "on": "temp",
+            "id": "RollingMean_Month"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 182.625,
+            "order": 2,
+            "id": "F_SemiAnnual"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "weekofyear",
+                "dayofweek"
+            ],
+            "id": "Interaction_Week_Day"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "fourier_sin_1_365",
+        "fourier_cos_1_365",
+        "fourier_sin_2_365",
+        "fourier_cos_2_365",
+        "dayofweek_x_is_weekend_Interaction_Day_Weekend",
+        "embed_0_LE_Quarterly",
+        "embed_1_LE_Quarterly",
+        "embed_2_LE_Quarterly",
+        "embed_3_LE_Quarterly",
+        "embed_4_LE_Quarterly",
+        "embed_5_LE_Quarterly",
+        "embed_6_LE_Quarterly",
+        "embed_7_LE_Quarterly",
+        "embed_8_LE_Quarterly",
+        "embed_9_LE_Quarterly",
+        "embed_10_LE_Quarterly",
+        "embed_11_LE_Quarterly",
+        "embed_12_LE_Quarterly",
+        "embed_13_LE_Quarterly",
+        "embed_14_LE_Quarterly",
+        "embed_15_LE_Quarterly",
+        "embed_16_LE_Quarterly",
+        "embed_17_LE_Quarterly",
+        "embed_18_LE_Quarterly",
+        "embed_19_LE_Quarterly",
+        "embed_20_LE_Quarterly",
+        "embed_21_LE_Quarterly",
+        "embed_22_LE_Quarterly",
+        "embed_23_LE_Quarterly",
+        "embed_24_LE_Quarterly",
+        "embed_25_LE_Quarterly",
+        "embed_26_LE_Quarterly",
+        "embed_27_LE_Quarterly",
+        "embed_28_LE_Quarterly",
+        "embed_29_LE_Quarterly",
+        "embed_30_LE_Quarterly",
+        "embed_31_LE_Quarterly",
+        "month_x_is_weekend_Interaction_Month_Weekend",
+        "embed_0_LE_Yearly",
+        "embed_1_LE_Yearly",
+        "embed_2_LE_Yearly",
+        "embed_3_LE_Yearly",
+        "embed_4_LE_Yearly",
+        "embed_5_LE_Yearly",
+        "embed_6_LE_Yearly",
+        "embed_7_LE_Yearly",
+        "embed_8_LE_Yearly",
+        "embed_9_LE_Yearly",
+        "embed_10_LE_Yearly",
+        "embed_11_LE_Yearly",
+        "embed_12_LE_Yearly",
+        "embed_13_LE_Yearly",
+        "embed_14_LE_Yearly",
+        "embed_15_LE_Yearly",
+        "embed_16_LE_Yearly",
+        "embed_17_LE_Yearly",
+        "embed_18_LE_Yearly",
+        "embed_19_LE_Yearly",
+        "embed_20_LE_Yearly",
+        "embed_21_LE_Yearly",
+        "embed_22_LE_Yearly",
+        "embed_23_LE_Yearly",
+        "embed_24_LE_Yearly",
+        "embed_25_LE_Yearly",
+        "embed_26_LE_Yearly",
+        "embed_27_LE_Yearly",
+        "embed_28_LE_Yearly",
+        "embed_29_LE_Yearly",
+        "embed_30_LE_Yearly",
+        "embed_31_LE_Yearly",
+        "fourier_sin_1_182",
+        "fourier_cos_1_182",
+        "fourier_sin_2_182",
+        "fourier_cos_2_182",
+        "weekofyear_x_dayofweek_Interaction_Week_Day"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.3993325826072275,
+            "mae": 31836.576050505922,
+            "rmse": 68704.65220458452
+        },
+        "RandomForest": {
+            "r2": 0.33883588367992,
+            "mae": 31561.288567774936,
+            "rmse": 72081.48836807779
+        },
+        "XGBoost": {
+            "r2": 0.24445749914482218,
+            "mae": 35467.790810821614,
+            "rmse": 77054.59777909124
+        },
+        "CatBoost": {
+            "r2": 0.34047057347115195,
+            "mae": 31732.05314090699,
+            "rmse": 71992.32457883701
+        },
+        "TabNet": {
+            "r2": -0.8894554016609466,
+            "mae": 83718.8465507,
+            "rmse": 121853.33806730493
+        },
+        "SimpleNN": {
+            "r2": 0.2529503041715193,
+            "mae": 32163.958280051153,
+            "rmse": 76620.30117457281
+        },
+        "EnhancedNN": {
+            "r2": 0.3055019133172123,
+            "mae": 31474.257907408886,
+            "rmse": 73876.21472519898
+        },
+        "Transformer": {
+            "r2": 0.314507616737567,
+            "mae": 33087.29464713875,
+            "rmse": 73395.66756054424
+        }
+    },
+    "best_final_model": {
+        "name": "LightGBM",
+        "metrics": {
+            "r2": 0.3993325826072275,
+            "mae": 31836.576050505922,
+            "rmse": 68704.65220458452
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "period": 365.25,
+                    "order": 2,
+                    "id": "F_Yearly"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "window": 7,
+                    "on": "temp",
+                    "id": "RollingMean_Week"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3433649346638914,
+                "r2_score": 0.3433649346638914,
+                "num_features": 9
+            },
+            "adopted": true,
+            "reward": 0.030109368306448392
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "dayofweek",
+                        "is_weekend"
+                    ],
+                    "id": "Interaction_Day_Weekend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.38937441734716904,
+                "r2_score": 0.38937441734716904,
+                "num_features": 42
+            },
+            "adopted": true,
+            "reward": 0.04600948268327765
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "month",
+                        "is_weekend"
+                    ],
+                    "id": "Interaction_Month_Weekend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.4081515327757571,
+                "r2_score": 0.4081515327757571,
+                "num_features": 75
+            },
+            "adopted": true,
+            "reward": 0.018777115428588065
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "weekofyear",
+                        "is_weekend"
+                    ],
+                    "id": "Interaction_Week_Weekend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.38401834368439536,
+                "r2_score": 0.38401834368439536,
+                "num_features": 108
+            },
+            "adopted": false,
+            "reward": -0.02413318909136175
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly"
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "window": 30,
+                    "on": "temp",
+                    "id": "RollingMean_Month"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.4081515327757571,
+                "r2_score": 0.4081515327757571,
+                "num_features": 75
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_fourier_features",
+                    "period": 730.5,
+                    "order": 2,
+                    "id": "F_BiYear"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37567504305703237,
+                "r2_score": 0.37567504305703237,
+                "num_features": 111
+            },
+            "adopted": false,
+            "reward": -0.032476489718724744
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "period": 182.625,
+                    "order": 2,
+                    "id": "F_SemiAnnual"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "weekofyear",
+                        "dayofweek"
+                    ],
+                    "id": "Interaction_Week_Day"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.41179877150878597,
+                "r2_score": 0.41179877150878597,
+                "num_features": 80
+            },
+            "adopted": true,
+            "reward": 0.003647238733028857
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "month",
+                        "dayofweek"
+                    ],
+                    "id": "Interaction_Month_Day"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.38751461532124065,
+                "r2_score": 0.38751461532124065,
+                "num_features": 113
+            },
+            "adopted": false,
+            "reward": -0.024284156187545314
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "month",
+                        "dayofweek"
+                    ],
+                    "id": "Interaction_Month_Day"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.38751461532124065,
+                "r2_score": 0.38751461532124065,
+                "num_features": 113
+            },
+            "adopted": false,
+            "reward": -0.024284156187545314
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_fourier_features",
+                    "period": 730.5,
+                    "order": 2,
+                    "id": "F_BiYear"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3943929236181677,
+                "r2_score": 0.3943929236181677,
+                "num_features": 116
+            },
+            "adopted": false,
+            "reward": -0.017405847890618276
+        }
+    ]
+}

@@ -35,15 +35,15 @@
         "fourier_cos_1_182"
     ],
     "final_validation_scores": {
-        "LightGBM": 0.7002117020704373,
-        "RandomForest": 0.7241761803243179,
-        "XGBoost": 0.6448641384753768,
-        "SimpleNN": 0.7033810715834687,
-        "EnhancedNN": 0.7219116479303975,
-        "Transformer": 0.7135902077891311
+        "LightGBM": 0.2166001809091137,
+        "RandomForest": 0.32830792595215896,
+        "XGBoost": 0.305030431369,
+        "SimpleNN": 0.2954825107799667,
+        "EnhancedNN": 0.2303341993837481,
+        "Transformer": 0.3256439095767074
     },
     "best_final_model": {
         "name": "RandomForest",
-        "score": 0.7241761803243179
+        "score": 0.32830792595215896
     }
 }

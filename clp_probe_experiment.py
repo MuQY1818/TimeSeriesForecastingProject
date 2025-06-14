@@ -18,6 +18,10 @@ from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from datetime import datetime
 import random
+from pytorch_tabnet.tab_model import TabNetRegressor
+from catboost import CatBoostRegressor
+import re
+from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
@@ -160,10 +164,10 @@ class LearnedEmbedder(nn.Module):
 # --- Autoencoder Models for Pre-training ---
 class MaskedEncoder(nn.Module):
     """
-    A powerful, deep encoder that processes a sequence and outputs a sequence of latent representations.
-    This is the core of our pre-trained feature extractor.
+    A powerful, deep encoder that processes a sequence, passes it through a bottleneck,
+    and outputs a single, low-dimensional latent vector representing the entire sequence.
     """
-    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int):
+    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, final_embedding_dim: int):
         super().__init__()
         self.gru = nn.GRU(
             input_size=input_dim,
@@ -172,45 +176,87 @@ class MaskedEncoder(nn.Module):
             batch_first=True,
             bidirectional=True
         )
+        self.projection = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim), # Bidirectional GRU output is 2 * hidden_dim
+            nn.ReLU(),
+            nn.Linear(hidden_dim, final_embedding_dim) # Project to final low-dimensional embedding
+        )
     
     def forward(self, x):
         # x shape: (batch_size, seq_len, input_dim)
-        # outputs shape: (batch_size, seq_len, hidden_dim * 2)
-        outputs, _ = self.gru(x)
-        return outputs
+        # Get the hidden states from the GRU. We only need the final hidden state.
+        _, h_n = self.gru(x) # h_n shape: (num_layers * 2, batch_size, hidden_dim)
+        
+        # Concatenate the final forward and backward hidden states from the last layer
+        # h_n[-2,:,:] is the last forward hidden state
+        # h_n[-1,:,:] is the last backward hidden state
+        last_hidden = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1) # shape: (batch_size, hidden_dim * 2)
+        
+        # Project this concatenated state to the final embedding dimension
+        embedding = self.projection(last_hidden) # shape: (batch_size, final_embedding_dim)
+        return embedding
 
 class MaskedDecoder(nn.Module):
-    """A lightweight decoder used ONLY during pre-training to reconstruct the sequence."""
-    def __init__(self, hidden_dim: int, output_dim: int, num_layers: int):
+    """A powerful decoder that takes a single latent vector and reconstructs the original input sequence."""
+    def __init__(self, embedding_dim: int, hidden_dim: int, output_dim: int, seq_len: int, num_layers: int):
         super().__init__()
+        self.seq_len = seq_len
+        
+        # An initial layer to expand the latent vector's dimensionality
+        self.expansion_fc = nn.Linear(embedding_dim, hidden_dim * 2)
+        
         self.gru = nn.GRU(
-            input_size=hidden_dim * 2, # Input from encoder
+            input_size=hidden_dim * 2, # Input from the expanded latent vector
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
             bidirectional=True
         )
+        # Final layer to reconstruct the sequence feature-wise
         self.fc = nn.Linear(hidden_dim * 2, output_dim)
 
     def forward(self, x):
-        outputs, _ = self.gru(x)
-        reconstruction = self.fc(outputs)
+        # x shape: (batch_size, embedding_dim)
+        
+        # 1. Expand the latent vector to a higher dimension
+        x_expanded = self.expansion_fc(x)
+        
+        # 2. Repeat this vector for each time step in the sequence to feed the GRU
+        # This creates a (batch_size, seq_len, hidden_dim * 2) tensor
+        x_repeated = x_expanded.unsqueeze(1).repeat(1, self.seq_len, 1)
+        
+        # 3. Pass through the GRU to generate the sequence
+        outputs, _ = self.gru(x_repeated)
+        
+        # 4. Project the output of each time step to the original feature dimension
+        reconstruction = self.fc(outputs) # shape: (batch_size, seq_len, output_dim)
         return reconstruction
 
 class MaskedTimeSeriesAutoencoder(nn.Module):
-    """Combines Encoder and Decoder for pre-training with masking."""
-    def __init__(self, input_dim: int, encoder_hidden_dim: int, encoder_layers: int, decoder_hidden_dim: int, decoder_layers: int):
+    """Combines the new Encoder and Decoder for pre-training with a bottleneck."""
+    def __init__(self, input_dim: int, encoder_hidden_dim: int, encoder_layers: int, decoder_hidden_dim: int, decoder_layers: int, final_embedding_dim: int, seq_len: int):
         super().__init__()
-        self.encoder = MaskedEncoder(input_dim=input_dim, hidden_dim=encoder_hidden_dim, num_layers=encoder_layers)
-        self.decoder = MaskedDecoder(hidden_dim=encoder_hidden_dim, output_dim=input_dim, num_layers=decoder_layers)
+        self.encoder = MaskedEncoder(
+            input_dim=input_dim, 
+            hidden_dim=encoder_hidden_dim, 
+            num_layers=encoder_layers,
+            final_embedding_dim=final_embedding_dim
+        )
+        self.decoder = MaskedDecoder(
+            embedding_dim=final_embedding_dim, 
+            hidden_dim=decoder_hidden_dim, 
+            output_dim=input_dim, 
+            seq_len=seq_len,
+            num_layers=decoder_layers
+        )
 
     def forward(self, x_masked):
-        latent_representation = self.encoder(x_masked)
-        reconstruction = self.decoder(latent_representation)
+        latent_embedding = self.encoder(x_masked)
+        reconstruction = self.decoder(latent_embedding)
         return reconstruction
 
 def pretrain_embedder(df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFrame, window_size: int, config: dict, results_dir: str):
-    """Pre-trains a masked autoencoder and returns the trained ENCODER part."""
+    """Pre-trains a masked autoencoder with validation and early stopping, and returns the trained ENCODER part."""
     input_dim = df_to_pretrain_on.shape[1]
     print(f"  - Preparing data for masked autoencoder pre-training (window: {window_size}, input_dim: {input_dim})...")
     
@@ -227,26 +273,51 @@ def pretrain_embedder(df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFr
     
     if not sequences:
         print("  - ⚠️ Warning: Not enough data for pre-training. Returning untrained encoder.")
-        return MaskedEncoder(input_dim=input_dim, hidden_dim=config['encoder_hidden_dim'], num_layers=config['encoder_layers']), scaler
+        return MaskedEncoder(input_dim=input_dim, hidden_dim=config['encoder_hidden_dim'], num_layers=config['encoder_layers'], final_embedding_dim=config['final_embedding_dim']), scaler
 
-    dataset = TensorDataset(torch.FloatTensor(np.array(sequences)))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+    # --- Create Training and Validation Sets ---
+    split_idx = int(len(sequences) * 0.8)
+    train_sequences = sequences[:split_idx]
+    val_sequences = sequences[split_idx:]
     
+    if len(val_sequences) == 0:
+        # Fallback for small datasets where validation set might be empty
+        print("  - ⚠️ Warning: Not enough data for a validation set. Training without early stopping.")
+        train_sequences = sequences
+        val_sequences = [] # Ensure val_loader is empty
+
+    train_dataset = TensorDataset(torch.FloatTensor(np.array(train_sequences)))
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
+    
+    val_loader = None
+    if val_sequences:
+        val_dataset = TensorDataset(torch.FloatTensor(np.array(val_sequences)))
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     autoencoder = MaskedTimeSeriesAutoencoder(
         input_dim=input_dim,
         encoder_hidden_dim=config['encoder_hidden_dim'],
         encoder_layers=config['encoder_layers'],
         decoder_hidden_dim=config['decoder_hidden_dim'],
-        decoder_layers=config['decoder_layers']
+        decoder_layers=config['decoder_layers'],
+        final_embedding_dim=config['final_embedding_dim'],
+        seq_len=window_size
     ).to(device)
-    criterion = nn.MSELoss(reduction='none')
+    criterion = nn.MSELoss() # Use standard MSE for loss calculation
     optimizer = optim.Adam(autoencoder.parameters(), lr=config['learning_rate'])
 
-    print(f"  - Pre-training Masked Autoencoder on {len(dataset)} sequences for {config['epochs']} epochs...")
+    print(f"  - Pre-training Masked Autoencoder on {len(train_dataset)} sequences for up to {config['epochs']} epochs...")
+
+    best_val_loss = float('inf')
+    epochs_no_improve = 0
+    best_model_state = None
+
     for epoch in range(config['epochs']):
-        epoch_loss = 0
-        for i, (batch,) in enumerate(loader):
+        # --- Training Phase ---
+        autoencoder.train()
+        train_loss = 0
+        for i, (batch,) in enumerate(train_loader):
             batch = batch.to(device)
             optimizer.zero_grad()
             
@@ -259,23 +330,61 @@ def pretrain_embedder(df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFr
             reconstruction = autoencoder(x_masked_input)
             
             # Calculate loss ONLY on masked elements
-            loss_all = criterion(reconstruction, batch)
-            masked_indices = ~unmasked_indices
-            loss_mask = masked_indices.unsqueeze(-1).expand_as(loss_all)
-            masked_loss = loss_all[loss_mask]
+            loss_mask = ~unmasked_indices
+            loss = criterion(reconstruction[loss_mask], batch[loss_mask])
             
-            if masked_loss.numel() > 0:
-                loss = masked_loss.mean()
+            if torch.isfinite(loss):
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
+                train_loss += loss.item()
+        
+        avg_train_loss = train_loss / (i + 1) if i > 0 else train_loss
+        
+        # --- Validation Phase ---
+        if val_loader:
+            autoencoder.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for i, (batch,) in enumerate(val_loader):
+                    batch = batch.to(device)
+                    noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
+                    unmasked_indices = noise > config['mask_ratio']
+                    x_masked_input = batch.clone()
+                    x_masked_input[~unmasked_indices] = 0
+                    
+                    reconstruction = autoencoder(x_masked_input)
+                    
+                    loss_mask = ~unmasked_indices
+                    loss = criterion(reconstruction[loss_mask], batch[loss_mask])
+                    
+                    if torch.isfinite(loss):
+                        val_loss += loss.item()
 
-        if (epoch + 1) % 10 == 0:
-            avg_loss = epoch_loss / (i + 1) if i > 0 else epoch_loss
-            print(f"    Epoch [{epoch+1}/{config['epochs']}], Loss: {avg_loss:.6f}")
+            avg_val_loss = val_loss / (i + 1) if i > 0 else val_loss
+            print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+
+            # --- Early Stopping Check ---
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                epochs_no_improve = 0
+                best_model_state = autoencoder.state_dict()
+                # print(f"      -> New best val_loss: {best_val_loss:.6f}")
+            else:
+                epochs_no_improve += 1
+            
+            if epochs_no_improve >= config['patience']:
+                print(f"    -- Early stopping triggered after {config['patience']} epochs. --")
+                break
+        else: # No validation set
+            if (epoch + 1) % 10 == 0:
+                print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}")
+    
+    # Load the best model if early stopping was used
+    if best_model_state:
+        autoencoder.load_state_dict(best_model_state)
     
     # Visualize final reconstruction
-    visualize_autoencoder_reconstruction(autoencoder.to('cpu'), loader, scaler, results_dir, config['mask_ratio'])
+    visualize_autoencoder_reconstruction(autoencoder.to('cpu'), train_loader, scaler, results_dir, config['mask_ratio'])
 
     return autoencoder.encoder.to("cpu"), scaler
 
@@ -377,10 +486,14 @@ Your task is to devise a feature engineering plan to improve the model's R^2 sco
 *** FEATURE ENGINEERING HIERARCHY & RULES ***
 1.  **PRIORITIZE EXOGENOUS AND LEARNED FEATURES:** Your primary focus should be creating features from independent sources (like 'dayofweek', 'month') and from the pre-trained learned embeddings ('embed_*'). These features help the model understand the underlying drivers of the time series.
 2.  **USE TARGET-DERIVED FEATURES SPARINGLY:** You may create rolling statistics (mean, std, etc.) or lags/diffs based on the target variable ('{self.target_col}'). However, use these ONLY to capture any remaining auto-correlation that the primary features missed. Do not rely on them as your main strategy. A good model should not solely depend on the recent history of the target.
+3.  **STRATEGICALLY COMBINE FEATURE TYPES:** You now have two types of features at your disposal:
+    - **High-Frequency (e.g., `create_lag`, `create_diff`):** These capture sharp, immediate details and spikes but can be noisy.
+    - **Low-Frequency (`create_learned_embedding`):** These capture smoothed, long-term trends and seasonality but miss the fine-grained spikes.
+    Your key task is to find the optimal **combination** of these. For example, a yearly embedding (`window=365`) could provide the trend, while a daily lag (`days=1`) provides the short-term correction.
 
 The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
 Example for a multi-scale embedding plan: {{"plan": [{{"operation": "create_learned_embedding", "window": 365, "id": "LE_Yearly"}}, {{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}]}}
-Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [30, 90, 365]. This is a powerful way to capture patterns at different time scales.
+Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [90, 365, 730]. This is a powerful way to capture patterns at different time scales.
 For `create_fourier_features`, the operation will always be applied to the 'date' column.
 Do not suggest features that already exist. Do not suggest deleting the last remaining feature.
 """
@@ -432,98 +545,46 @@ def evaluate_performance(df: pd.DataFrame, target_col: str):
 
     return score, importances.sort_values(ascending=False), shap_contributions
 
-def probe_feature_set(df: pd.DataFrame, target_col: str, window_size=30, n_probes=1):
+def probe_feature_set(df: pd.DataFrame, target_col: str):
     """
-    R²-based Downstream Task Probe.
-    Evaluates a feature set based on its ability to predict the *actual target variable*
-    in a time-series cross-validation setup. This avoids "probe overfitting" by
-    tying the score directly to the downstream task.
+    NEW PROBE: LightGBM R²-based Downstream Task Probe.
+    Evaluates a feature set based on its ability to predict the target variable
+    using a fast and robust LightGBM model. This is a more direct and reliable
+    proxy for the final performance on tabular models.
     """
     # 1. Prepare Data
-    df_feat = df.drop(columns=['date']).dropna()
-    # Align target with features after dropping NaNs
-    df_aligned = df.loc[df_feat.index]
-    
-    features_df = df_feat.drop(columns=[target_col])
-    target_df = df_aligned[[target_col]]
+    df_feat = df.drop(columns=['date', target_col]).dropna()
+    y = df.loc[df_feat.index][target_col]
+    X = df_feat
 
-    if features_df.empty:
+    if X.empty or y.empty:
+        print("  - ⚠️ Warning: Feature set is empty after dropping NaNs. Returning poor score.")
         return {"primary_score": 0.0, "r2_score": 0.0, "num_features": 0}
 
-    # 2. Time-series split *before* any scaling to prevent data leakage
-    train_size = int(len(features_df) * 0.8)
-    features_train, features_val = features_df[:train_size], features_df[train_size:]
-    target_train, target_val = target_df[:train_size], target_df[train_size:]
-
-    if len(features_val) < window_size: # Not enough data for even one validation sequence
-        return {"primary_score": 0.0, "r2_score": 0.0, "num_features": features_df.shape[1]}
-
-    # 3. Fit scalers ONLY on training data
-    scaler_X = MinMaxScaler()
-    scaler_y = MinMaxScaler()
+    # Use a simple time-series split (no shuffling)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
-    features_train_scaled = scaler_X.fit_transform(features_train)
-    target_train_scaled = scaler_y.fit_transform(target_train)
+    if len(X_train) < 1 or len(X_test) < 1:
+        print("  - ⚠️ Warning: Not enough data for train/test split. Returning poor score.")
+        return {"primary_score": 0.0, "r2_score": 0.0, "num_features": X.shape[1]}
 
-    # 4. Apply the same scalers to validation data
-    features_val_scaled = scaler_X.transform(features_val)
-    target_val_scaled = scaler_y.transform(target_val)
-
-    # 5. Create sequences from scaled data
-    def create_sequences(features, target, window_size):
-        X, y = [], []
-        # Ensure we have enough data to form at least one sequence.
-        if len(features) > window_size:
-            for i in range(len(features) - window_size):
-                X.append(features[i:i+window_size])
-                y.append(target[i+window_size])
-        return np.array(X), np.array(y)
-
-    X_train, y_train = create_sequences(features_train_scaled, target_train_scaled, window_size)
-    X_val, y_val = create_sequences(features_val_scaled, target_val_scaled, window_size)
-
-    if X_val.size == 0 or y_val.size == 0:
-         return {"primary_score": 0.0, "r2_score": 0.0, "num_features": features_df.shape[1]}
-
-    X_train, y_train = torch.FloatTensor(X_train), torch.FloatTensor(y_train)
-    X_val, y_val = torch.FloatTensor(X_val), torch.FloatTensor(y_val)
+    # 2. Model Training & Prediction
+    # Use a simple, fast-to-train LightGBM model
+    lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=50, verbosity=-1, n_jobs=1)
+    lgb_model.fit(X_train, y_train)
     
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    predictions = lgb_model.predict(X_test)
     
-    # 6. Train the Probe Model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_dim = X_train.shape[2]
-    model = DynamicProbeModel(input_dim=input_dim, output_dim=1).to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    model.train()
-    for epoch in range(20):
-        for inputs, targets in train_loader:
-            optimizer.zero_grad()
-            outputs = model(inputs.to(device))
-            loss = criterion(outputs, targets.to(device))
-            loss.backward()
-            optimizer.step()
-
-    # 7. Evaluate and return R² score
-    model.eval()
-    with torch.no_grad():
-        val_preds_scaled = model(X_val.to(device)).cpu().numpy()
+    # 3. Calculate R² score
+    score = r2_score(y_test, predictions)
     
-    # We must use the original unscaled validation target for r2_score
-    y_val_orig = target_val.values[window_size:]
-    val_preds_orig = scaler_y.inverse_transform(val_preds_scaled)
-
-    score = r2_score(y_val_orig, val_preds_orig)
-    
+    # Primary score must be non-negative for the reinforcement learning logic
     primary_score = max(0.0, score)
 
     return {
         "primary_score": primary_score,
         "r2_score": score,
-        "num_features": X_train.shape[2]
+        "num_features": X.shape[1]
     }
 
 def visualize_final_predictions(dates, y_true, y_pred, best_model_name, probe_name, best_model_metrics, results_dir):
@@ -577,10 +638,19 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
     X = df.drop(columns=['date', target_col]).dropna()
     y = df.loc[X.index][target_col]
 
+    # For TabNet, we should identify categorical features
+    # A simple heuristic: columns with a small number of unique values that are not float.
+    categorical_cols = [col for col in X.columns if (X[col].dtype in ['object', 'category', 'int64'] and X[col].nunique() < 50) and col not in ['date', target_col]]
+    categorical_indices = [X.columns.get_loc(col) for col in categorical_cols]
+    cat_dims = [X[col].nunique() for col in categorical_cols]
+    print(f"  - Identified {len(categorical_cols)} categorical features for TabNet: {categorical_cols}")
+
     models = {
         'LightGBM': lgb.LGBMRegressor(random_state=42),
         'RandomForest': RandomForestRegressor(random_state=42),
         'XGBoost': XGBRegressor(random_state=42),
+        'CatBoost': CatBoostRegressor(random_state=42, verbose=0),
+        'TabNet': TabNetRegressor(cat_idxs=categorical_indices, cat_dims=cat_dims, seed=42, verbose=0),
         'SimpleNN': SimpleNN(X.shape[1]),
         'EnhancedNN': EnhancedNN(X.shape[1]),
         'Transformer': TransformerModel(X.shape[1])
@@ -590,6 +660,9 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
     final_results = {}
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
+    
+    # Create a validation set from the training set for early stopping in TabNet
+    X_train_np, X_val_np, y_train_np, y_val_np = train_test_split(X_train.values, y_train.values.reshape(-1,1), test_size=0.2, random_state=42, shuffle=False)
     
     scaler = MinMaxScaler()
     X_train_s = scaler.fit_transform(X_train)
@@ -603,7 +676,16 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
         if name in ['SimpleNN', 'EnhancedNN', 'Transformer']:
             preds_scaled = train_pytorch_model(model, X_train_s, y_train_s, X_test_s)
             preds = scaler_y.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
-        else:
+        elif name == 'TabNet':
+            model.fit(
+                X_train=X_train_np, y_train=y_train_np,
+                eval_set=[(X_val_np, y_val_np)],
+                patience=15, max_epochs=100,
+                batch_size=1024,
+                eval_metric=['rmse']
+            )
+            preds = model.predict(X_test.values).flatten()
+        else: # LGBM, RF, XGB, CatBoost
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
         
@@ -721,36 +803,110 @@ class TLAFS_Algorithm:
         df_for_scaling = df_for_pretraining.iloc[:train_size]
         print(f"Scalers for embeddings will be fit on the first {train_size} rows to prevent data leakage.")
 
-        print("\n🧠 Pre-training MULTI-SCALE Masked Autoencoders to generate features...")
+        print("\n🧠 Pre-training or LOADING MULTI-SCALE Masked Autoencoders...")
+        
+        # --- NEW: Logic to save/load pre-trained models ---
+        pretrained_models_dir = "pretrained_models"
+        os.makedirs(pretrained_models_dir, exist_ok=True)
         
         self.pretrained_encoders = {}
         self.embedder_scalers = {}
-        embedding_window_sizes = [30, 90, 365] # e.g., monthly, quarterly, yearly patterns
+        embedding_window_sizes = [90, 365, 730]
+        input_dim = len(TLAFS_Algorithm.pretrain_cols_static)
 
+        pretrain_config = {
+            'encoder_hidden_dim': 128, 'encoder_layers': 4,
+            'decoder_hidden_dim': 64, 'decoder_layers': 2,
+            'final_embedding_dim': 32, # The new bottleneck dimension
+            'epochs': 50, 'batch_size': 64, 'patience': 10,
+            'learning_rate': 0.001, 'mask_ratio': 0.4
+        }
+        
         for window_size in embedding_window_sizes:
-            print(f"\n--- Training for window size: {window_size} days ---")
-            pretrain_config = {
-                'encoder_hidden_dim': 128, 'encoder_layers': 4,
-                'decoder_hidden_dim': 64, 'decoder_layers': 1,
-                'epochs': 100, 'batch_size': 64,
-                'learning_rate': 0.001, 'mask_ratio': 0.4
-            }
+            encoder_path = os.path.join(pretrained_models_dir, f"encoder_ws{window_size}.pth")
+            scaler_path = os.path.join(pretrained_models_dir, f"scaler_ws{window_size}.joblib")
 
-            encoder, scaler = pretrain_embedder(
-                df_for_pretraining,       # The AE can learn patterns from all data
-                df_for_scaling,           # But the scaler is ONLY fit on the training portion
-                window_size=window_size,
-                config=pretrain_config,
-                results_dir=self.results_dir
-            )
-            self.pretrained_encoders[window_size] = encoder
-            self.embedder_scalers[window_size] = scaler
-            print(f"   ✅ Pre-training complete for window {window_size}.")
+            if os.path.exists(encoder_path) and os.path.exists(scaler_path):
+                print(f"\n--- Loading pre-trained model for window size: {window_size} days ---")
+                encoder = MaskedEncoder(
+                    input_dim=input_dim,
+                    hidden_dim=pretrain_config['encoder_hidden_dim'],
+                    num_layers=pretrain_config['encoder_layers'],
+                    final_embedding_dim=pretrain_config['final_embedding_dim']
+                )
+                encoder.load_state_dict(torch.load(encoder_path))
+                encoder.eval() # Set to evaluation mode
+                scaler = joblib.load(scaler_path)
+                
+                self.pretrained_encoders[window_size] = encoder
+                self.embedder_scalers[window_size] = scaler
+                print(f"   ✅ Loaded encoder and scaler from {pretrained_models_dir}")
+            else:
+                print(f"\n--- No pre-trained model found. Training for window size: {window_size} days ---")
+                encoder, scaler = pretrain_embedder(
+                    df_for_pretraining,       # The AE can learn patterns from all data
+                    df_for_scaling,           # But the scaler is ONLY fit on the training portion
+                    window_size=window_size,
+                    config=pretrain_config,
+                    results_dir=self.results_dir
+                )
+                
+                # Save the newly trained model and scaler for future runs
+                torch.save(encoder.state_dict(), encoder_path)
+                joblib.dump(scaler, scaler_path)
+                print(f"   ✅ Pre-training complete. Saved new encoder and scaler to {pretrained_models_dir}")
+                
+                self.pretrained_encoders[window_size] = encoder
+                self.embedder_scalers[window_size] = scaler
         
         # Add static dictionaries for the static method to use
         TLAFS_Algorithm.pretrained_encoders = self.pretrained_encoders
         TLAFS_Algorithm.embedder_scalers = self.embedder_scalers
         TLAFS_Algorithm.target_col_static = self.target_col
+
+    @staticmethod
+    def summarize_feature_list(features: list) -> list:
+        """Compresses a list of feature names into a more compact, readable format for LLMs."""
+        
+        # Group features by a pattern. Key is a descriptive name, value is a list of numbers.
+        # e.g., key='embed_*_embed90', value=[0, 1, 2, ...]
+        groups = defaultdict(list)
+        ungrouped = []
+
+        # Regex for embedding features like 'embed_12_LE_Yearly'
+        embed_pattern = re.compile(r"^(embed_)(\d+)(_.*)$")
+        # Regex for fourier features like 'fourier_sin_2_365'
+        fourier_pattern = re.compile(r"^(fourier_(?:sin|cos)_)(\d+)(_.*)$")
+
+        for f in features:
+            embed_match = embed_pattern.match(f)
+            fourier_match = fourier_pattern.match(f)
+            
+            if embed_match:
+                prefix, number, suffix = embed_match.groups()
+                group_key = f"{prefix}*{suffix}"
+                groups[group_key].append(int(number))
+            elif fourier_match:
+                prefix, number, suffix = fourier_match.groups()
+                group_key = f"{prefix}*{suffix}"
+                groups[group_key].append(int(number))
+            else:
+                ungrouped.append(f)
+
+        # Reconstruct the list
+        summarized_list = ungrouped
+        for key, numbers in groups.items():
+            if len(numbers) > 3:
+                min_n, max_n = min(numbers), max(numbers)
+                # Reconstruct name from key, e.g. 'embed_*_LE_Yearly' -> 'embed_0-31_LE_Yearly'
+                summarized_name = key.replace('*', f'{min_n}-{max_n}')
+                summarized_list.append(summarized_name)
+            else:
+                # Not enough to summarize, add them back individually
+                for n in numbers:
+                    summarized_list.append(key.replace('*', str(n)))
+        
+        return sorted(summarized_list)
 
     @staticmethod
     def execute_plan(df: pd.DataFrame, plan: list):
@@ -760,13 +916,30 @@ class TLAFS_Algorithm:
         It contains all non-leaky feature generation logic.
         """
         temp_df = df.copy()
+
+        # --- FIX: Ensure base features for embeddings exist ---
+        # The pre-trained embedder relies on a specific set of columns.
+        # We must ensure they are present in the dataframe before any plan execution,
+        # making this function robust for both search and re-evaluation modes.
+        required_time_cols = ['dayofweek', 'month', 'weekofyear', 'is_weekend']
+        if not all(col in temp_df.columns for col in required_time_cols):
+            print("  - Ensuring base time features for embeddings are present...")
+            if 'dayofweek' not in temp_df.columns:
+                temp_df['dayofweek'] = temp_df['date'].dt.dayofweek
+            if 'month' not in temp_df.columns:
+                temp_df['month'] = temp_df['date'].dt.month
+            if 'weekofyear' not in temp_df.columns:
+                temp_df['weekofyear'] = temp_df['date'].dt.isocalendar().week.astype(int)
+            if 'is_weekend' not in temp_df.columns:
+                temp_df['is_weekend'] = (temp_df['date'].dt.dayofweek >= 5).astype(int)
         
         target_col = TLAFS_Algorithm.target_col_static
         
         for step in plan:
             op = step.get("operation")
             # BUG FIX: Handle 'feature', 'base_feature', 'column', or 'target' to align with LLM.
-            feature = step.get("feature") or step.get("base_feature") or step.get("column") or step.get("target")
+            # --- NEW ROBUSTNESS FIX --- Also handle 'on' as a synonym for 'feature'
+            feature = step.get("feature") or step.get("base_feature") or step.get("column") or step.get("target") or step.get("on")
 
             # A more robust way to generate a new column name
             def get_new_col_name(base_feature, id_suggestion):
@@ -837,6 +1010,14 @@ class TLAFS_Algorithm:
                     scaler = TLAFS_Algorithm.embedder_scalers.get(window)
 
                     if embedder and scaler:
+                        # --- BUG FIX: Ensure required columns exist RIGHT BEFORE they are used ---
+                        if not all(col in temp_df.columns for col in required_time_cols):
+                            print("  - Ensuring base time features for embeddings are present...")
+                            if 'dayofweek' not in temp_df.columns: temp_df['dayofweek'] = temp_df['date'].dt.dayofweek
+                            if 'month' not in temp_df.columns: temp_df['month'] = temp_df['date'].dt.month
+                            if 'weekofyear' not in temp_df.columns: temp_df['weekofyear'] = temp_df['date'].dt.isocalendar().week.astype(int)
+                            if 'is_weekend' not in temp_df.columns: temp_df['is_weekend'] = (temp_df['date'].dt.dayofweek >= 5).astype(int)
+                            
                         id = step.get("id", f"embed{window}")
                         pretrain_cols = TLAFS_Algorithm.pretrain_cols_static
                         
@@ -853,15 +1034,9 @@ class TLAFS_Algorithm:
                             
                         tensor = torch.FloatTensor(sequences)
                         with torch.no_grad():
-                            # Encoder returns a sequence of latent vectors: (batch, seq_len, hidden_dim * 2)
-                            latent_sequence = embedder(tensor).numpy()
-                            # --- Hybrid Pooling (Mean + Max) ---
-                            # Perform mean pooling to get the "average" state of the sequence
-                            avg_pooled = np.mean(latent_sequence, axis=1)
-                            # Perform max pooling to get the "peak" events in the sequence
-                            max_pooled = np.max(latent_sequence, axis=1)
-                            # Concatenate both to provide a richer representation
-                            embeddings = np.concatenate([avg_pooled, max_pooled], axis=1)
+                            # The new encoder directly outputs the low-dimensional embedding.
+                            # No more complex pooling logic needed here.
+                            embeddings = embedder(tensor).numpy()
                             
                         valid_indices = temp_df.index[window-1:]
                         # CRITICAL FIX: Use shape[1] (number of features) not shape[0] (number of sequences)
@@ -869,13 +1044,13 @@ class TLAFS_Algorithm:
                         embed_df = pd.DataFrame(embeddings, index=valid_indices, columns=cols)
                         
                         # BUG FIX: Drop existing columns with the same names before joining to prevent overlap errors.
-                        # This allows the LLM to "update" an embedding feature.
                         existing_cols_to_drop = [col for col in cols if col in temp_df.columns]
                         if existing_cols_to_drop:
                             temp_df.drop(columns=existing_cols_to_drop, inplace=True)
 
                         temp_df = temp_df.join(embed_df)
-                        temp_df[cols] = temp_df[cols].ffill().fillna(0)
+                        # LEAKAGE FIX: Shift the embedding features by 1 to ensure they only contain past information.
+                        temp_df[cols] = temp_df[cols].shift(1).ffill().fillna(0)
                     else:
                         print(f"  - ⚠️ Embedder for window {window} not available. Skipping.")
 
@@ -908,15 +1083,20 @@ class TLAFS_Algorithm:
     def get_plan_from_llm(self, context_prompt):
         system_prompt = f"""You are an expert Data Scientist acting as a Reinforcement Learning agent. Your goal is to devise a feature engineering plan (your 'action') to maximize the future 'reward' (improvement in R^2 score).
 You will be given the current 'state' of the system (current features, scores) and a memory of past experiences.
+Note: The 'Available Features' list may contain summarized features like 'embed_0-31_id' which represents 32 individual features.
 Your response MUST be a valid JSON object containing a single key, "plan".
 
 *** FEATURE ENGINEERING HIERARCHY & RULES ***
 1.  **PRIORITIZE EXOGENOUS AND LEARNED FEATURES:** Your primary focus should be creating features from independent sources (like 'dayofweek', 'month') and from the pre-trained learned embeddings ('embed_*'). These features help the model understand the underlying drivers of the time series.
 2.  **USE TARGET-DERIVED FEATURES SPARINGLY:** You may create rolling statistics (mean, std, etc.) or lags/diffs based on the target variable ('{self.target_col}'). However, use these ONLY to capture any remaining auto-correlation that the primary features missed. Do not rely on them as your main strategy. A good model should not solely depend on the recent history of the target.
+3.  **STRATEGICALLY COMBINE FEATURE TYPES:** You now have two types of features at your disposal:
+    - **High-Frequency (e.g., `create_lag`, `create_diff`):** These capture sharp, immediate details and spikes but can be noisy.
+    - **Low-Frequency (`create_learned_embedding`):** These capture smoothed, long-term trends and seasonality but miss the fine-grained spikes.
+    Your key task is to find the optimal **combination** of these. For example, a yearly embedding (`window=365`) could provide the trend, while a daily lag (`days=1`) provides the short-term correction.
 
 The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
 Example for a multi-scale embedding plan: {{"plan": [{{"operation": "create_learned_embedding", "window": 365, "id": "LE_Yearly"}}, {{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}]}}
-Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [30, 90, 365]. This is a powerful way to capture patterns at different time scales.
+Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [90, 365, 730]. This is a powerful way to capture patterns at different time scales.
 For `create_fourier_features`, the operation will always be applied to the 'date' column.
 Do not suggest features that already exist. Do not suggest deleting the last remaining feature.
 """
@@ -950,13 +1130,16 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
         # We can pass the list of features being evaluated instead.
         available_features = list(self.best_df.drop(columns=['date', self.target_col]).columns)
         
+        # --- NEW: Summarize feature list to save tokens ---
+        summarized_features = TLAFS_Algorithm.summarize_feature_list(available_features)
+        
         context = {
             "Iteration": f"{iteration_num + 1}/{self.n_iterations}",
             "Current Predictability Score": probe_results['primary_score'],
             "Historical Best Score": self.best_score,
             "R2 Score (raw)": probe_results.get('r2_score', 0.0),
-            "Number of Features": probe_results.get('num_features', len(available_features)),
-            "Available Features": available_features,
+            "Number of Features": len(available_features), # Report the true number of features
+            "Available Features": summarized_features, # But show the summarized list
         }
         return context
 
@@ -975,7 +1158,7 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
         return prompt
 
     def run(self):
-        print(f"\n💡 Starting T-LAFS with R² Downstream Probe (RL Framework) ...\n")
+        print(f"\n💡 Starting T-LAFS with LightGBM Probe (RL Framework) ...\n")
         current_df = self.base_df.copy()
         current_plan = []
         
@@ -995,14 +1178,14 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             self.best_score = current_score
             self.best_df = current_df.copy()
             self.best_plan = current_plan.copy()
-            print(f"  - Initial baseline score (R²): {self.best_score:.4f} | Features: {probe_results.get('num_features', -1)}")
+            print(f"  - Initial baseline score (LGBM R²): {self.best_score:.4f} | Features: {probe_results.get('num_features', -1)}")
         except Exception as e:
             import traceback
             print(f"  - ❌ ERROR during initial evaluation: {e}\n{traceback.format_exc()}")
             return None, None, -1
 
         for i in range(self.n_iterations):
-            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: R² Downstream Task) -----")
+            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: LightGBM R²) -----")
             
             last_results = self.last_probe_results
             print(f"  - Current Score (R²): {last_results['primary_score']:.4f} | #Feats: {last_results.get('num_features', -1)} | Best Score: {self.best_score:.4f}")
@@ -1026,10 +1209,11 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             new_probe_results = probe_feature_set(df_with_new_features, self.target_col)
             new_score = new_probe_results["primary_score"]
 
-            print(f"  - Probe results: Score (R²)={new_score:.4f}, #Feats: {new_probe_results.get('num_features', -1)}")
+            print(f"  - Probe results: Score (LGBM R²)={new_score:.4f}, #Feats: {new_probe_results.get('num_features', -1)}")
             
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
-            is_adopted = new_score > (self.best_score - 0.01) # Use a slightly larger tolerance for R²
+            # We can use a smaller tolerance now that the probe is more stable
+            is_adopted = new_score > (self.best_score - 0.005) 
             
             reward = new_score - current_score
             self.experience_buffer.push(current_state_context, plan_extension, reward, is_adopted)
@@ -1054,7 +1238,7 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             
             self.history.append({"iteration": i + 1, "plan": plan_extension, "probe_results": new_probe_results, "adopted": is_adopted, "reward": reward})
 
-        print("\n" + "="*80 + f"\n🏆 T-LAFS (R² Downstream Probe) Finished! 🏆")
+        print("\n" + "="*80 + f"\n🏆 T-LAFS (LightGBM Probe) Finished! 🏆")
         print(f"   - Best Primary Score Achieved (during search): {self.best_score:.4f}")
         
         return self.best_df, self.best_plan, self.best_score
@@ -1063,25 +1247,18 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
 def main():
     """Main function to run the DAP experiment."""
     # ===== 配置变量 =====
-    DATASET_TYPE = 'min_daily_temps'  # 可选: 'min_daily_temps' 或 'total_cleaned'
-    # 探针配置
-    PROBE_NAME = 'quantum_dual_stream'  # 可选: 'quantum_dual_stream', 'dual_stream', 'bayesian_quantum'
-    PROBE_CONFIG = {
-        'quant_input_size': None,  # 将在运行时设置
-        'vocab_size': 5,
-        'qual_embed_dim': 16,
-        'quant_embed_dim': 48
-    }
+    DATASET_TYPE = 'total_cleaned'  # 可选: 'min_daily_temps' 或 'total_cleaned'
     
     # 实验配置
     N_ITERATIONS = 10
     TARGET_COL = 'temp'
     
-    # 数据配置
-    # DATA_PATH = 'data/min_daily_temps.csv'  # 不再需要
+    # --- We will run a new search with our validated architecture ---
+    USE_SAVED_PLAN = True 
+    SAVED_PLAN_PATH = 'results/run_2025-06-14_14-07-22/tlafs_results_probe_FinalSearch_LGBM_Probe.json' # Not used
     
     print("="*80)
-    print(f"🚀 T-LAFS Experiment: Dynamic Probe Guided Search")
+    print(f"🚀 T-LAFS Experiment: Search with LightGBM Probe")
     print("="*80)
 
     # --- 创建本次运行的专属结果目录 ---
@@ -1095,21 +1272,53 @@ def main():
     
     # 加载数据
     base_df = get_time_series_data(DATASET_TYPE)
-    
-    # 创建并运行TLAFS算法
-    tlafs = TLAFS_Algorithm(
-        base_df=base_df,
-        target_col=TARGET_COL,
-        n_iterations=N_ITERATIONS,
-        results_dir=results_dir
-    )
-    best_df, best_feature_plan, best_score_during_search = tlafs.run()
+    best_df = None
+    best_feature_plan = None
+    best_score_during_search = "N/A (Re-evaluation mode)"
+
+    if USE_SAVED_PLAN:
+        print(f"\n" + "="*50)
+        print(f"🔬 RE-EVALUATION MODE: Using plan from {SAVED_PLAN_PATH} 🔬")
+        print("="*50)
+
+        # We must initialize TLAFS to pre-train the encoders and set static variables
+        print("\nStep 1: Initializing T-LAFS to pre-train encoders...")
+        tlafs_alg = TLAFS_Algorithm(
+            base_df=base_df.copy(),
+            target_col=TARGET_COL,
+            n_iterations=1, # Not used, but required
+            results_dir=results_dir
+        )
+        print("   ✅ Encoders are ready.")
+
+        # Load and execute the saved plan
+        print("\nStep 2: Loading and executing saved feature plan...")
+        with open(SAVED_PLAN_PATH, 'r') as f:
+            results_data = json.load(f)
+        best_feature_plan = results_data['best_feature_plan']
+        best_df = TLAFS_Algorithm.execute_plan(base_df.copy(), best_feature_plan)
+        print(f"   ✅ Plan executed. Final dataframe has {best_df.shape[1]} features.")
+        # print(json.dumps(best_feature_plan, indent=2))
+
+    else:
+        # Original logic to run the full search
+        print("\n" + "="*50)
+        print(f"🚀 T-LAFS SEARCH MODE: Starting dynamic feature search... 🚀")
+        print("="*50)
+        tlafs = TLAFS_Algorithm(
+            base_df=base_df,
+            target_col=TARGET_COL,
+            n_iterations=N_ITERATIONS,
+            results_dir=results_dir
+        )
+        best_df, best_feature_plan, best_score_during_search = tlafs.run()
+
 
     # --- 最终验证和总结 ---
     if best_df is not None:
-        probe_name_for_reporting = "DynamicProbe"
+        probe_name_for_reporting = "FinalSearch_LGBM_Probe"
         print("\n" + "="*40)
-        print("🔬 FINAL VALIDATION ON ALL MODELS 🔬")
+        print(f"🔬 FINAL VALIDATION ON ALL MODELS ({probe_name_for_reporting}) 🔬")
         print("="*40)
         final_metrics, final_results = evaluate_on_multiple_models(
             best_df,
@@ -1127,7 +1336,8 @@ def main():
             print(f"🏆 EXECUTIVE SUMMARY: T-LAFS '{probe_name_for_reporting}' STRATEGY 🏆")
             print("="*60)
             print(f"Feature engineering search was conducted by: '{probe_name_for_reporting}'")
-            print(f"   - Best Primary Score during search phase: {best_score_during_search:.4f}")
+            if not USE_SAVED_PLAN:
+                print(f"   - Best Primary Score during search phase: {best_score_during_search:.4f}")
             print(f"\nBest feature plan discovered:")
             print(json.dumps(best_feature_plan, indent=2, ensure_ascii=False))
             print("\n------------------------------------------------------------")
@@ -1153,11 +1363,9 @@ def main():
             # --- 保存结果到JSON ---
             print("\n💾 Saving results to JSON...")
             results_to_save = {
+                "run_mode": "re-evaluation" if USE_SAVED_PLAN else "search",
+                "source_plan_file": SAVED_PLAN_PATH if USE_SAVED_PLAN else "N/A",
                 "probe_model": probe_name_for_reporting,
-                "probe_config": {
-                    "description": "Multi-faceted: Blend of LGBM+NN scores, stability, and diversity.",
-                    "n_probes": 3
-                },
                 "best_score_during_search": best_score_during_search,
                 "best_feature_plan": best_feature_plan,
                 "final_features": [col for col in best_df.columns if col not in ['date', TARGET_COL]],
@@ -1166,7 +1374,7 @@ def main():
                     "name": best_final_model_name,
                     "metrics": best_final_metrics
                 },
-                "run_history": tlafs.history
+                "run_history": tlafs.history if not USE_SAVED_PLAN else "N/A (Re-evaluation mode)"
             }
             save_results_to_json(results_to_save, probe_name_for_reporting, results_dir)
 
