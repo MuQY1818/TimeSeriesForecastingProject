@@ -5,7 +5,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import json
 import warnings
-from openai import OpenAI
+import google.generativeai as genai
 import os
 import torch
 import torch.nn as nn
@@ -22,23 +22,42 @@ from pytorch_tabnet.tab_model import TabNetRegressor
 from catboost import CatBoostRegressor
 import re
 from collections import defaultdict
+from sklearn.decomposition import PCA
 
 warnings.filterwarnings('ignore')
 
 # --- Global Variables & Setup ---
-client = None
+gemini_model = None
 N_STABILITY_RUNS = 1
 
 def setup_api_client():
-    """Initializes the OpenAI API client."""
-    global client
+    """Initializes the Google Gemini API client."""
+    global gemini_model
     try:
-        # NOTE: Ensure OPENAI_API_KEY and OPENAI_BASE_URL are set as environment variables
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL"))
-        client.models.list()
-        print("✅ OpenAI client initialized and connection successful.")
+        # --- Direct API Configuration (for demonstration) ---
+        # For security, it's recommended to use environment variables in production.
+        api_key = "sk-O4mZi7nZvCpp11x0UgbrIN5dr6jdNmTocD9ADso1S1ZWJzdL"
+        base_url = "https://api.openai-proxy.org/google"
+
+        genai.configure(
+            api_key=api_key,
+            transport="rest",
+            client_options={"api_endpoint": base_url},
+        )
+        
+        # This is important for getting structured output
+        generation_config = {"response_mime_type": "application/json"}
+        
+        gemini_model = genai.GenerativeModel(
+            'gemini-2.5-flash-preview-05-20',
+            generation_config=generation_config
+        )
+        
+        # Test connection by listing models
+        genai.list_models() 
+        print("✅ Gemini client initialized and connection successful.")
     except Exception as e:
-        print(f"❌ Failed to initialize OpenAI client: {e}")
+        print(f"❌ Failed to initialize Gemini client: {e}")
         exit()
 
 # --- Data Handling & DAP Specifics ---
@@ -117,7 +136,7 @@ def train_pytorch_model(model, X_train, y_train, X_test):
     
     dataset = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
     loader = DataLoader(dataset, batch_size=32, shuffle=True)
-    criterion, optimizer = nn.MSELoss(), optim.Adam(model.parameters(), lr=0.001)
+    criterion, optimizer = nn.SmoothL1Loss(), optim.Adam(model.parameters(), lr=0.001) # Use Huber Loss
 
     model.train()
     for epoch in range(50):
@@ -304,7 +323,7 @@ def pretrain_embedder(df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFr
         final_embedding_dim=config['final_embedding_dim'],
         seq_len=window_size
     ).to(device)
-    criterion = nn.MSELoss() # Use standard MSE for loss calculation
+    criterion = nn.SmoothL1Loss() # Use Huber Loss for robustness to outliers
     optimizer = optim.Adam(autoencoder.parameters(), lr=config['learning_rate'])
 
     print(f"  - Pre-training Masked Autoencoder on {len(train_dataset)} sequences for up to {config['epochs']} epochs...")
@@ -469,50 +488,45 @@ def call_strategist_llm(context: str):
     Calls the LLM to get a feature engineering plan.
     This is where the 'thinking' happens.
     """
-    if not client:
+    if not gemini_model:
         print("❌ LLM client not initialized. Cannot call strategist.")
         # Return a simple plan as a fallback
         return [{"operation": "create_rolling_mean", "feature": "temp", "window": 3, "id": "fallback"}]
 
     try:
-        completion = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are an expert Data Scientist specializing in time-series forecasting. 
-Your task is to devise a feature engineering plan to improve the model's R^2 score. Your response MUST be a valid JSON object containing a single key, "plan".
+        # Use the global gemini_model configured in setup_api_client
+        if gemini_model is None:
+            raise Exception("Gemini model not initialized. Please run setup_api_client().")
+        
+        # Combine prompts for Gemini
+        full_prompt_for_gemini = system_prompt + "\n\n" + context_prompt
+        
+        response = gemini_model.generate_content(full_prompt_for_gemini)
+        plan_str = response.text
 
-*** FEATURE ENGINEERING HIERARCHY & RULES ***
-1.  **PRIORITIZE EXOGENOUS AND LEARNED FEATURES:** Your primary focus should be creating features from independent sources (like 'dayofweek', 'month') and from the pre-trained learned embeddings ('embed_*'). These features help the model understand the underlying drivers of the time series.
-2.  **USE TARGET-DERIVED FEATURES SPARINGLY:** You may create rolling statistics (mean, std, etc.) or lags/diffs based on the target variable ('{self.target_col}'). However, use these ONLY to capture any remaining auto-correlation that the primary features missed. Do not rely on them as your main strategy. A good model should not solely depend on the recent history of the target.
-3.  **STRATEGICALLY COMBINE FEATURE TYPES:** You now have two types of features at your disposal:
-    - **High-Frequency (e.g., `create_lag`, `create_diff`):** These capture sharp, immediate details and spikes but can be noisy.
-    - **Low-Frequency (`create_learned_embedding`):** These capture smoothed, long-term trends and seasonality but miss the fine-grained spikes.
-    Your key task is to find the optimal **combination** of these. For example, a yearly embedding (`window=365`) could provide the trend, while a daily lag (`days=1`) provides the short-term correction.
+        parsed_json = json.loads(plan_str)
 
-The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
-Example for a multi-scale embedding plan: {{"plan": [{{"operation": "create_learned_embedding", "window": 365, "id": "LE_Yearly"}}, {{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}]}}
-Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [90, 365, 730]. This is a powerful way to capture patterns at different time scales.
-For `create_fourier_features`, the operation will always be applied to the 'date' column.
-Do not suggest features that already exist. Do not suggest deleting the last remaining feature.
-"""
-                },
-                {
-                    "role": "user",
-                    "content": context
-                }
-            ],
-            temperature=0.7,
-            response_format={"type": "json_object"}
-        )
-        plan_str = completion.choices[0].message.content
-        # The response is often wrapped in a root key like "plan"
-        plan = json.loads(plan_str)
-        return plan.get("plan", plan) # Adapt to however the LLM structures the JSON
+        # --- NEW: Robust plan parsing to handle single-dict or list responses ---
+        # Case 1: The response is a dictionary with a "plan" key (legacy format)
+        if isinstance(parsed_json, dict) and "plan" in parsed_json:
+            plan = parsed_json.get("plan", [])
+            return plan if isinstance(plan, list) else [plan]
+
+        # Case 2: The response is already a list of operations (ideal format)
+        elif isinstance(parsed_json, list):
+            return parsed_json
+
+        # Case 3: The response is a single operation dictionary (common for 1-step plans)
+        elif isinstance(parsed_json, dict) and "operation" in parsed_json:
+            return [parsed_json] # Wrap it in a list to make it iterable
+
+        # Fallback for unexpected structure
+        print(f"  - ⚠️ Warning: LLM returned an unexpected plan structure: {parsed_json}")
+        return []
     except Exception as e:
-        print(f"❌ Error calling LLM: {e}")
-        return [{"operation": "create_rolling_std", "feature": "temp", "window": 5, "id": "fallback_err"}]
+        print(f"❌ Error calling Gemini or parsing plan: {e}")
+        # Fallback plan updated to not use the target variable directly for rolling stats
+        return [{"operation": "create_rolling_std", "feature": "month", "window": 3, "id": "fallback_err"}]
 
 def evaluate_performance(df: pd.DataFrame, target_col: str):
     """
@@ -547,43 +561,56 @@ def evaluate_performance(df: pd.DataFrame, target_col: str):
 
 def probe_feature_set(df: pd.DataFrame, target_col: str):
     """
-    NEW PROBE: LightGBM R²-based Downstream Task Probe.
-    Evaluates a feature set based on its ability to predict the target variable
-    using a fast and robust LightGBM model. This is a more direct and reliable
-    proxy for the final performance on tabular models.
+    NEW PROBE: Multi-Model Fusion Probe.
+    Evaluates a feature set's general quality by testing it on two diverse models:
+    1. LightGBM (a tree-based model)
+    2. SimpleNN (a neural network)
+    The final score is a blend of their performances, rewarding universally good features.
     """
     # 1. Prepare Data
     df_feat = df.drop(columns=['date', target_col]).dropna()
     y = df.loc[df_feat.index][target_col]
     X = df_feat
 
-    if X.empty or y.empty:
-        print("  - ⚠️ Warning: Feature set is empty after dropping NaNs. Returning poor score.")
-        return {"primary_score": 0.0, "r2_score": 0.0, "num_features": 0}
+    if X.empty or y.empty or len(X) < 20: # Added length check for robustness
+        print("  - ⚠️ Warning: Feature set is empty or too small. Returning poor score.")
+        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": 0}
 
     # Use a simple time-series split (no shuffling)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-    
+
     if len(X_train) < 1 or len(X_test) < 1:
         print("  - ⚠️ Warning: Not enough data for train/test split. Returning poor score.")
-        return {"primary_score": 0.0, "r2_score": 0.0, "num_features": X.shape[1]}
+        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": X.shape[1]}
 
-    # 2. Model Training & Prediction
-    # Use a simple, fast-to-train LightGBM model
+    # --- Model 1: LightGBM ---
     lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=50, verbosity=-1, n_jobs=1)
     lgb_model.fit(X_train, y_train)
+    preds_lgbm = lgb_model.predict(X_test)
+    score_lgbm = r2_score(y_test, preds_lgbm)
+
+    # --- Model 2: SimpleNN ---
+    scaler_x = MinMaxScaler()
+    X_train_s = scaler_x.fit_transform(X_train)
+    X_test_s = scaler_x.transform(X_test)
+
+    scaler_y = MinMaxScaler()
+    y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
     
-    predictions = lgb_model.predict(X_test)
+    nn_model = SimpleNN(X_train.shape[1])
+    preds_nn_scaled = train_pytorch_model(nn_model, X_train_s, y_train_s, X_test_s)
+    preds_nn = scaler_y.inverse_transform(preds_nn_scaled.reshape(-1, 1)).flatten()
+    score_nn = r2_score(y_test, preds_nn)
     
-    # 3. Calculate R² score
-    score = r2_score(y_test, predictions)
-    
-    # Primary score must be non-negative for the reinforcement learning logic
-    primary_score = max(0.0, score)
+    # --- Fusion Logic ---
+    # We can use a simple average or a weighted average. Let's use a 50/50 blend.
+    # We clip scores at 0 to prevent negative rewards from overly punishing the agent.
+    primary_score = 0.5 * max(0.0, score_lgbm) + 0.5 * max(0.0, score_nn)
 
     return {
         "primary_score": primary_score,
-        "r2_score": score,
+        "r2_lgbm": score_lgbm,
+        "r2_nn": score_nn,
         "num_features": X.shape[1]
     }
 
@@ -746,23 +773,22 @@ class ExperienceReplayBuffer:
 
         if good_samples:
             prompt_str += "\n**Successful Plans (Adopted with High Reward):**\n"
-            for i, exp in enumerate(good_samples):
-                prompt_str += f"Example {i+1}:\n"
+            for exp in good_samples:
                 r2 = exp['state'].get('R2 Score (raw)', -1.0)
                 num_feats = exp['state'].get('Number of Features', 'N/A')
-                prompt_str += f" - Context: R² score was {r2:.4f} with {num_feats} features: {exp['state']['Available Features']}.\n"
-                prompt_str += f" - Proposed Plan: {exp['action']}\n"
-                prompt_str += f" - Outcome: Plan was ADOPTED, leading to a reward of {exp['reward']:.4f}.\n"
+                features = exp['state']['Available Features']
+                plan = exp['action']
+                reward = exp['reward']
+                prompt_str += f"- PAST_CONTEXT: R²={r2:.3f}, #Feats={num_feats}, Feats={features}. PLAN: {plan}. OUTCOME: ADOPTED, reward={reward:.3f}.\n"
         
         if bad_samples:
             prompt_str += "\n**Failed Plans (Rejected):**\n"
-            for i, exp in enumerate(bad_samples):
-                prompt_str += f"Example {i+1}:\n"
+            for exp in bad_samples:
                 r2 = exp['state'].get('R2 Score (raw)', -1.0)
                 num_feats = exp['state'].get('Number of Features', 'N/A')
-                prompt_str += f" - Context: R² score was {r2:.4f} with {num_feats} features: {exp['state']['Available Features']}.\n"
-                prompt_str += f" - Proposed Plan: {exp['action']}\n"
-                prompt_str += f" - Outcome: Plan was REJECTED.\n"
+                features = exp['state']['Available Features']
+                plan = exp['action']
+                prompt_str += f"- PAST_CONTEXT: R²={r2:.3f}, #Feats={num_feats}, Feats={features}. PLAN: {plan}. OUTCOME: REJECTED.\n"
             
         return prompt_str
 
@@ -783,7 +809,6 @@ class TLAFS_Algorithm:
         self.best_score = -np.inf
         self.best_plan = []
         self.best_df = None
-        self.client = OpenAI()
         self.results_dir = results_dir
         self.experience_buffer = ExperienceReplayBuffer(capacity=20)
         
@@ -815,10 +840,10 @@ class TLAFS_Algorithm:
         input_dim = len(TLAFS_Algorithm.pretrain_cols_static)
 
         pretrain_config = {
-            'encoder_hidden_dim': 128, 'encoder_layers': 4,
-            'decoder_hidden_dim': 64, 'decoder_layers': 2,
-            'final_embedding_dim': 32, # The new bottleneck dimension
-            'epochs': 50, 'batch_size': 64, 'patience': 10,
+            'encoder_hidden_dim': 256, 'encoder_layers': 4,
+            'decoder_hidden_dim': 128, 'decoder_layers': 2,
+            'final_embedding_dim': 64, # The new bottleneck dimension
+            'epochs': 100, 'batch_size': 64, 'patience': 15,
             'learning_rate': 0.001, 'mask_ratio': 0.4
         }
         
@@ -863,6 +888,119 @@ class TLAFS_Algorithm:
         TLAFS_Algorithm.pretrained_encoders = self.pretrained_encoders
         TLAFS_Algorithm.embedder_scalers = self.embedder_scalers
         TLAFS_Algorithm.target_col_static = self.target_col
+
+        print("\n🧠 Pre-training or LOADING RESIDUAL Autoencoder...")
+        residual_encoder_path = os.path.join(pretrained_models_dir, "residual_encoder.pth")
+        residual_scaler_path = os.path.join(pretrained_models_dir, "residual_scaler.joblib")
+        TLAFS_Algorithm.residual_embedding_window = 365 # Hardcode for simplicity
+
+        # --- 1. Create the residual signals for pre-training ---
+        df_for_residuals = self.base_df[[self.target_col]].copy()
+        # High-res model (captures details, leaves trend/seasonality in residuals)
+        high_res_pred = df_for_residuals[self.target_col].shift(1)
+        # Low-res model (captures trend, leaves details in residuals)
+        low_res_pred = df_for_residuals[self.target_col].rolling(window=90, min_periods=1).mean().shift(1)
+
+        # Calculate residuals (the "meta-features")
+        df_for_residuals['high_freq_residuals'] = df_for_residuals[self.target_col] - low_res_pred
+        df_for_residuals['low_freq_residuals'] = df_for_residuals[self.target_col] - high_res_pred
+        df_for_residuals = df_for_residuals[['high_freq_residuals', 'low_freq_residuals']].fillna(0)
+
+        # The autoencoder for residuals has input_dim=2
+        residual_input_dim = 2
+
+        if os.path.exists(residual_encoder_path) and os.path.exists(residual_scaler_path):
+            print(f"\n--- Loading pre-trained RESIDUAL model ---")
+            residual_encoder = MaskedEncoder(
+                input_dim=residual_input_dim,
+                hidden_dim=pretrain_config['encoder_hidden_dim'],
+                num_layers=pretrain_config['encoder_layers'],
+                final_embedding_dim=pretrain_config['final_embedding_dim']
+            )
+            residual_encoder.load_state_dict(torch.load(residual_encoder_path))
+            residual_encoder.eval()
+            residual_scaler = joblib.load(residual_scaler_path)
+            
+            self.residual_encoder = residual_encoder
+            self.residual_scaler = residual_scaler
+            print(f"   ✅ Loaded residual encoder and scaler from {pretrained_models_dir}")
+        else:
+            print(f"\n--- No pre-trained RESIDUAL model found. Training now... ---")
+            # Use the same pre-training config, but on the 2-column residual data
+            residual_encoder, residual_scaler = pretrain_embedder(
+                df_for_residuals,
+                df_for_residuals.iloc[:train_size], # Use same train split for scaler fitting
+                window_size=TLAFS_Algorithm.residual_embedding_window,
+                config=pretrain_config,
+                results_dir=self.results_dir
+            )
+            
+            torch.save(residual_encoder.state_dict(), residual_encoder_path)
+            joblib.dump(residual_scaler, residual_scaler_path)
+            print(f"   ✅ Pre-training complete. Saved new residual encoder and scaler.")
+            
+            self.residual_encoder = residual_encoder
+            self.residual_scaler = residual_scaler
+
+        # Add static dictionaries for the static method to use
+        TLAFS_Algorithm.residual_encoder = self.residual_encoder
+        TLAFS_Algorithm.residual_scaler = self.residual_scaler
+
+        print("\n🧠 Pre-training Meta-Forecast Models...")
+        self.meta_forecast_models = {}
+        meta_features = ['lag1', 'lag7', 'lag30']
+        
+        df_for_meta = self.base_df[[self.target_col]].copy()
+        for lag in [1, 7, 30]:
+            df_for_meta[f'lag{lag}'] = df_for_meta[self.target_col].shift(lag)
+        df_for_meta.dropna(inplace=True)
+        
+        X_meta = df_for_meta[meta_features].values
+        y_meta = df_for_meta[[self.target_col]].values
+        
+        # Split data for meta-model training
+        train_size_meta = int(len(X_meta) * 0.8)
+        X_train_meta, y_train_meta = X_meta[:train_size_meta], y_meta[:train_size_meta]
+        
+        # Scale features
+        scaler_x_meta = MinMaxScaler()
+        X_train_meta_s = scaler_x_meta.fit_transform(X_train_meta)
+        
+        scaler_y_meta = MinMaxScaler()
+        y_train_meta_s = scaler_y_meta.fit_transform(y_train_meta)
+        
+        meta_input_size = len(meta_features)
+        models_to_train = {
+            'SimpleNN_meta': SimpleNN(input_size=meta_input_size),
+            'EnhancedNN_meta': EnhancedNN(input_size=meta_input_size)
+        }
+        
+        for name, model in models_to_train.items():
+            print(f"  - Training {name}...")
+            # Simplified training loop
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+            dataset = TensorDataset(torch.FloatTensor(X_train_meta_s), torch.FloatTensor(y_train_meta_s))
+            loader = DataLoader(dataset, batch_size=32, shuffle=True)
+            criterion, optimizer = nn.SmoothL1Loss(), optim.Adam(model.parameters(), lr=0.001)
+
+            model.train()
+            for epoch in range(30): # shorter training for these meta models
+                for inputs, targets in loader:
+                    optimizer.zero_grad()
+                    outputs = model(inputs.to(device))
+                    loss = criterion(outputs, targets.to(device))
+                    loss.backward()
+                    optimizer.step()
+            model.eval()
+            self.meta_forecast_models[name] = model.to('cpu')
+        
+        # Store scalers for use in execute_plan
+        self.meta_scalers = {'x': scaler_x_meta, 'y': scaler_y_meta}
+        
+        # Make them available to static method
+        TLAFS_Algorithm.meta_forecast_models = self.meta_forecast_models
+        TLAFS_Algorithm.meta_scalers = self.meta_scalers
 
     @staticmethod
     def summarize_feature_list(features: list) -> list:
@@ -951,18 +1089,21 @@ class TLAFS_Algorithm:
                 # --- Basic Time-Series Features ---
                 if op == "create_lag":
                     days = step.get("days", 1)
+                    if isinstance(days, list) and days: days = int(days[0])
                     id = step.get("id", f"lag{days}")
                     new_col_name = get_new_col_name(feature, id)
                     temp_df[new_col_name] = temp_df[feature].shift(days).ffill().fillna(0)
 
                 elif op == "create_diff":
                     periods = step.get("periods", 1)
+                    if isinstance(periods, list) and periods: periods = int(periods[0])
                     id = step.get("id", f"diff{periods}")
                     new_col_name = get_new_col_name(feature, id)
                     temp_df[new_col_name] = temp_df[feature].diff(periods).shift(1).ffill().fillna(0)
 
                 elif op in ["create_rolling_mean", "create_rolling_std", "create_rolling_skew", "create_rolling_kurt", "create_rolling_min", "create_rolling_max"]:
                     window = step.get("window", 7)
+                    if isinstance(window, list) and window: window = int(window[0])
                     op_name = op.split('_')[2]
                     id = step.get("id", f"roll_{op_name}{window}")
                     new_col_name = get_new_col_name(feature, id)
@@ -971,6 +1112,7 @@ class TLAFS_Algorithm:
 
                 elif op == "create_ewm":
                     span = step.get("span", 7)
+                    if isinstance(span, list) and span: span = int(span[0])
                     id = step.get("id", f"ewm{span}")
                     new_col_name = get_new_col_name(feature, id)
                     temp_df[new_col_name] = temp_df[feature].ewm(span=span, adjust=False).mean().shift(1).ffill().fillna(0)
@@ -993,8 +1135,11 @@ class TLAFS_Algorithm:
                     # This operation is always based on the 'date' column for seasonality.
                     # We ignore the 'feature' parameter from the LLM to prevent errors.
                     if pd.api.types.is_datetime64_any_dtype(temp_df['date']):
-                        period = float(step["period"])
-                        order = int(step["order"])
+                        # DEFENSIVE: Provide defaults for period and order to handle incomplete LLM plans
+                        period = float(step.get("period", 365.25))
+                        if isinstance(period, list) and period: period = float(period[0])
+                        order = int(step.get("order", 4))
+                        if isinstance(order, list) and order: order = int(order[0])
                         time_idx = (temp_df['date'] - temp_df['date'].min()).dt.days
                         for k in range(1, order + 1):
                             temp_df[f'fourier_sin_{k}_{int(period)}'] = np.sin(2 * np.pi * k * time_idx / period)
@@ -1006,6 +1151,7 @@ class TLAFS_Algorithm:
                 elif op == "create_learned_embedding":
                     # --- NEW: Multi-scale embedding logic ---
                     window = step.get("window", 90) # Default to 90 if not specified
+                    if isinstance(window, list) and window: window = int(window[0])
                     embedder = TLAFS_Algorithm.pretrained_encoders.get(window)
                     scaler = TLAFS_Algorithm.embedder_scalers.get(window)
 
@@ -1069,10 +1215,58 @@ class TLAFS_Algorithm:
                     else:
                         print(f"  - ⚠️ Skipping interaction for invalid/missing features: {features}")
 
+                elif op == "create_forecast_feature":
+                    model_name = step.get("model_name")
+                    id = step.get("id", model_name)
+                    
+                    if model_name in TLAFS_Algorithm.meta_forecast_models:
+                        print(f"  - Generating forecast feature from pre-trained model: {model_name}...")
+                        model = TLAFS_Algorithm.meta_forecast_models[model_name]
+                        scalers = TLAFS_Algorithm.meta_scalers
+                        
+                        # 1. Create the specific lag features this model needs from the target
+                        meta_features = ['lag1', 'lag7', 'lag30']
+                        df_for_pred = pd.DataFrame(index=temp_df.index)
+                        for lag in [1, 7, 30]:
+                            df_for_pred[f'lag{lag}'] = temp_df[target_col].shift(lag)
+                        
+                        # Keep track of original index to align series later
+                        df_for_pred.dropna(inplace=True)
+
+                        if not df_for_pred.empty:
+                            # 2. Scale features using the saved scaler
+                            X_pred_s = scalers['x'].transform(df_for_pred[meta_features].values)
+                            
+                            # 3. Predict
+                            model.eval()
+                            with torch.no_grad():
+                                preds_s = model(torch.FloatTensor(X_pred_s)).numpy()
+                            
+                            # 4. Inverse transform predictions
+                            preds = scalers['y'].inverse_transform(preds_s).flatten()
+                            
+                            # 5. Add to dataframe, aligning with the index before NaNs were dropped
+                            new_col_name = id # The LLM is asked to provide a unique ID
+                            pred_series = pd.Series(preds, index=df_for_pred.index)
+                            temp_df[new_col_name] = pred_series
+                            
+                            # LEAKAGE FIX: Shift the forecast feature to ensure it's available at prediction time
+                            temp_df[new_col_name] = temp_df[new_col_name].shift(1).ffill().fillna(0)
+                        else:
+                            print(f"  - ⚠️ Not enough data to generate forecast feature for {model_name}. Skipping.")
+                    else:
+                        print(f"  - ⚠️ Forecast model '{model_name}' not found. Skipping.")
+                
                 elif op == "delete_feature":
-                    if feature in temp_df.columns and feature not in ['date', target_col]:
-                        temp_df.drop(columns=[feature], inplace=True)
-                        print(f"  - Successfully deleted feature: {feature}")
+                    feature_to_delete = step.get("feature")
+
+                    if feature_to_delete:
+                        # Original logic to delete a single named feature
+                        if feature_to_delete in temp_df.columns and feature_to_delete not in ['date', target_col]:
+                            temp_df.drop(columns=[feature_to_delete], inplace=True)
+                            print(f"  - Successfully deleted feature: {feature_to_delete}")
+                    else:
+                        print("  - ⚠️ Warning: 'delete_feature' called without 'feature'. Skipping.")
                 
             except Exception as e:
                 import traceback
@@ -1080,47 +1274,97 @@ class TLAFS_Algorithm:
         
         return temp_df
         
-    def get_plan_from_llm(self, context_prompt):
-        system_prompt = f"""You are an expert Data Scientist acting as a Reinforcement Learning agent. Your goal is to devise a feature engineering plan (your 'action') to maximize the future 'reward' (improvement in R^2 score).
-You will be given the current 'state' of the system (current features, scores) and a memory of past experiences.
-Note: The 'Available Features' list may contain summarized features like 'embed_0-31_id' which represents 32 individual features.
-Your response MUST be a valid JSON object containing a single key, "plan".
+    def get_plan_from_llm(self, context_prompt, iteration_num, max_iterations):
+        """
+        Dynamically generates a system prompt based on the current iteration stage
+        to guide the LLM through a curriculum of feature engineering.
+        """
+        
+        # --- Curriculum Learning Stages ---
+        stage = "advanced" # Default stage
+        if (iteration_num / max_iterations) < 0.4:
+            stage = "basic"
 
-*** FEATURE ENGINEERING HIERARCHY & RULES ***
-1.  **PRIORITIZE EXOGENOUS AND LEARNED FEATURES:** Your primary focus should be creating features from independent sources (like 'dayofweek', 'month') and from the pre-trained learned embeddings ('embed_*'). These features help the model understand the underlying drivers of the time series.
-2.  **USE TARGET-DERIVED FEATURES SPARINGLY:** You may create rolling statistics (mean, std, etc.) or lags/diffs based on the target variable ('{self.target_col}'). However, use these ONLY to capture any remaining auto-correlation that the primary features missed. Do not rely on them as your main strategy. A good model should not solely depend on the recent history of the target.
-3.  **STRATEGICALLY COMBINE FEATURE TYPES:** You now have two types of features at your disposal:
-    - **High-Frequency (e.g., `create_lag`, `create_diff`):** These capture sharp, immediate details and spikes but can be noisy.
-    - **Low-Frequency (`create_learned_embedding`):** These capture smoothed, long-term trends and seasonality but miss the fine-grained spikes.
-    Your key task is to find the optimal **combination** of these. For example, a yearly embedding (`window=365`) could provide the trend, while a daily lag (`days=1`) provides the short-term correction.
-
-The available operations are: create_lag, create_diff, create_rolling_mean, create_rolling_std, create_ewm, create_rolling_skew, create_rolling_kurt, create_rolling_min, create_rolling_max, create_time_features, create_fourier_features, create_interaction, create_learned_embedding, delete_feature.
-Example for a multi-scale embedding plan: {{"plan": [{{"operation": "create_learned_embedding", "window": 365, "id": "LE_Yearly"}}, {{"operation": "create_fourier_features", "period": 365.25, "order": 2, "id": "F_Year"}}]}}
-Note on `create_learned_embedding`: You can now specify a `window` size. Available sizes are [90, 365, 730]. This is a powerful way to capture patterns at different time scales.
-For `create_fourier_features`, the operation will always be applied to the 'date' column.
-Do not suggest features that already exist. Do not suggest deleting the last remaining feature.
+        # --- Base Prompt ---
+        base_prompt = f"""You are a Data Scientist RL agent. Your goal is to create a feature engineering plan to maximize the Fusion R^2 score.
+Your response MUST be a valid JSON list of operations: `[ {{"operation": "op_name", ...}}, ... ]`.
+The target column is '{self.target_col}'.
 """
+        # --- Tool Definitions based on Stage ---
+        basic_tools = """
+# *** STAGE 1: BASIC FEATURE ENGINEERING ***
+# Focus on creating a strong baseline with fundamental time-series features.
+# AVAILABLE TOOLS:
+- {{"operation": "create_lag", "on": "feature_name", "days": int, "id": "..."}}
+- {{"operation": "create_diff", "on": "feature_name", "periods": int, "id": "..."}}
+- {{"operation": "create_rolling_mean", "on": "feature_name", "window": int, "id": "..."}}
+- {{"operation": "create_rolling_std", "on": "feature_name", "window": int, "id": "..."}}
+- {{"operation": "create_ewm", "on": "feature_name", "span": int, "id": "..."}}
+- {{"operation": "create_fourier_features", "period": 365.25, "order": 4}}
+- {{"operation": "create_interaction", "features": ["feat1", "feat2"], "id": "..."}}
+- {{"operation": "delete_feature", "feature": "feature_name"}}
+"""
+
+        advanced_tools = """
+# *** STAGE 2: ADVANCED FEATURE ENGINEERING ***
+# Now you can use powerful learned embeddings and meta-forecasts. Combine them with the best basic features.
+# AVAILABLE TOOLS (includes all basic tools plus):
+# 1. Learned Embeddings (VERY POWERFUL)
+- {{"operation": "create_learned_embedding", "window": [90, 365, 730], "id": "UNIQUE_ID"}}
+
+# 2. Meta-Forecast Features
+- {{"operation": "create_forecast_feature", "model_name": ["SimpleNN_meta", "EnhancedNN_meta"], "id": "UNIQUE_ID"}}
+"""
+        # --- Rules ---
+        rules = """
+*** RULES ***
+- IDs must be unique. Do not reuse IDs from "Available Features".
+- Propose short plans (1-3 steps).
+- For parameters shown with a list of options (e.g., "window": [90, 365]), you MUST CHOOSE ONLY ONE value (e.g., "window": 365). DO NOT return a list for the value.
+- `create_learned_embedding` is very powerful. Try interacting it with other features using `create_interaction`.
+- Do not try to compress `learned_embedding` features; use them directly.
+"""
+
+        system_prompt = base_prompt
+        if stage == "basic":
+            system_prompt += basic_tools
+        else: # advanced stage
+            system_prompt += basic_tools + advanced_tools
+
+        system_prompt += rules
+        
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": context_prompt
-                    }
-                ],
-                temperature=0.7,
-                response_format={"type": "json_object"}
-            )
-            plan_str = response.choices[0].message.content
-            plan = json.loads(plan_str)
-            return plan.get("plan", plan)
+            # Use the global gemini_model configured in setup_api_client
+            if gemini_model is None:
+                raise Exception("Gemini model not initialized. Please run setup_api_client().")
+            
+            # Combine prompts for Gemini
+            full_prompt_for_gemini = system_prompt + "\n\n" + context_prompt
+            
+            response = gemini_model.generate_content(full_prompt_for_gemini)
+            plan_str = response.text
+
+            parsed_json = json.loads(plan_str)
+
+            # --- NEW: Robust plan parsing to handle single-dict or list responses ---
+            # Case 1: The response is a dictionary with a "plan" key (legacy format)
+            if isinstance(parsed_json, dict) and "plan" in parsed_json:
+                plan = parsed_json.get("plan", [])
+                return plan if isinstance(plan, list) else [plan]
+
+            # Case 2: The response is already a list of operations (ideal format)
+            elif isinstance(parsed_json, list):
+                return parsed_json
+
+            # Case 3: The response is a single operation dictionary (common for 1-step plans)
+            elif isinstance(parsed_json, dict) and "operation" in parsed_json:
+                return [parsed_json] # Wrap it in a list to make it iterable
+
+            # Fallback for unexpected structure
+            print(f"  - ⚠️ Warning: LLM returned an unexpected plan structure: {parsed_json}")
+            return []
         except Exception as e:
-            print(f"❌ Error calling LLM: {e}")
+            print(f"❌ Error calling Gemini or parsing plan: {e}")
             # Fallback plan updated to not use the target variable directly for rolling stats
             return [{"operation": "create_rolling_std", "feature": "month", "window": 3, "id": "fallback_err"}]
 
@@ -1137,7 +1381,8 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             "Iteration": f"{iteration_num + 1}/{self.n_iterations}",
             "Current Predictability Score": probe_results['primary_score'],
             "Historical Best Score": self.best_score,
-            "R2 Score (raw)": probe_results.get('r2_score', 0.0),
+            "R2 Score (LightGBM)": probe_results.get('r2_lgbm', 0.0),
+            "R2 Score (SimpleNN)": probe_results.get('r2_nn', 0.0),
             "Number of Features": len(available_features), # Report the true number of features
             "Available Features": summarized_features, # But show the summarized list
         }
@@ -1158,7 +1403,7 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
         return prompt
 
     def run(self):
-        print(f"\n💡 Starting T-LAFS with LightGBM Probe (RL Framework) ...\n")
+        print(f"\n💡 Starting T-LAFS with Fusion Probe (RL Framework) ...\n")
         current_df = self.base_df.copy()
         current_plan = []
         
@@ -1178,24 +1423,24 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             self.best_score = current_score
             self.best_df = current_df.copy()
             self.best_plan = current_plan.copy()
-            print(f"  - Initial baseline score (LGBM R²): {self.best_score:.4f} | Features: {probe_results.get('num_features', -1)}")
+            print(f"  - Initial baseline score (Fusion R²): {self.best_score:.4f} | Features: {probe_results.get('num_features', -1)}")
         except Exception as e:
             import traceback
             print(f"  - ❌ ERROR during initial evaluation: {e}\n{traceback.format_exc()}")
             return None, None, -1
 
         for i in range(self.n_iterations):
-            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: LightGBM R²) -----")
+            print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: Fusion R²) -----")
             
             last_results = self.last_probe_results
-            print(f"  - Current Score (R²): {last_results['primary_score']:.4f} | #Feats: {last_results.get('num_features', -1)} | Best Score: {self.best_score:.4f}")
+            print(f"  - Current Score (Fusion R²): {last_results['primary_score']:.4f} | R2_LGBM: {last_results.get('r2_lgbm', -1):.3f} | R2_NN: {last_results.get('r2_nn', -1):.3f} | #Feats: {last_results.get('num_features', -1)} | Best Score: {self.best_score:.4f}")
 
             print("\nStep 1: Strategist LLM is devising a new feature combo plan...")
             
             current_state_context = self.build_llm_context(last_results, i)
-            in_context_examples = self.experience_buffer.sample(n_good=2, n_bad=1)
+            in_context_examples = self.experience_buffer.sample(n_good=1, n_bad=1)
             full_prompt = self.format_prompt_for_llm(current_state_context, in_context_examples)
-            plan_extension = self.get_plan_from_llm(full_prompt)
+            plan_extension = self.get_plan_from_llm(full_prompt, i, self.n_iterations)
             
             if not plan_extension:
                 self.history.append({"iteration": i + 1, "plan": [], "score": current_score, "adopted": False, "action": "noop"})
@@ -1209,7 +1454,7 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             new_probe_results = probe_feature_set(df_with_new_features, self.target_col)
             new_score = new_probe_results["primary_score"]
 
-            print(f"  - Probe results: Score (LGBM R²)={new_score:.4f}, #Feats: {new_probe_results.get('num_features', -1)}")
+            print(f"  - Probe results: Fusion Score={new_score:.4f}, R2_LGBM: {new_probe_results.get('r2_lgbm', -1):.3f}, R2_NN: {new_probe_results.get('r2_nn', -1):.3f}, #Feats: {new_probe_results.get('num_features', -1)}")
             
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
             # We can use a smaller tolerance now that the probe is more stable
@@ -1238,7 +1483,7 @@ Do not suggest features that already exist. Do not suggest deleting the last rem
             
             self.history.append({"iteration": i + 1, "plan": plan_extension, "probe_results": new_probe_results, "adopted": is_adopted, "reward": reward})
 
-        print("\n" + "="*80 + f"\n🏆 T-LAFS (LightGBM Probe) Finished! 🏆")
+        print("\n" + "="*80 + f"\n🏆 T-LAFS (Fusion Probe) Finished! 🏆")
         print(f"   - Best Primary Score Achieved (during search): {self.best_score:.4f}")
         
         return self.best_df, self.best_plan, self.best_score
@@ -1254,11 +1499,11 @@ def main():
     TARGET_COL = 'temp'
     
     # --- We will run a new search with our validated architecture ---
-    USE_SAVED_PLAN = True 
-    SAVED_PLAN_PATH = 'results/run_2025-06-14_14-07-22/tlafs_results_probe_FinalSearch_LGBM_Probe.json' # Not used
+    USE_SAVED_PLAN = False 
+    SAVED_PLAN_PATH = '' # Not used
     
     print("="*80)
-    print(f"🚀 T-LAFS Experiment: Search with LightGBM Probe")
+    print(f"🚀 T-LAFS Experiment: Search with Fusion Probe")
     print("="*80)
 
     # --- 创建本次运行的专属结果目录 ---
@@ -1316,7 +1561,7 @@ def main():
 
     # --- 最终验证和总结 ---
     if best_df is not None:
-        probe_name_for_reporting = "FinalSearch_LGBM_Probe"
+        probe_name_for_reporting = "FinalSearch_Fusion_Probe"
         print("\n" + "="*40)
         print(f"🔬 FINAL VALIDATION ON ALL MODELS ({probe_name_for_reporting}) 🔬")
         print("="*40)

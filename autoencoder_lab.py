@@ -5,219 +5,273 @@ from torch.utils.data import TensorDataset, DataLoader
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 import os
+import math
 
-# --- Model Definitions (Bottleneck Architecture) ---
+# --- Model Definitions (NEW: Agent Attention Probe Architecture) ---
 
-class MaskedEncoder(nn.Module):
+class AgentAttentionProbe(nn.Module):
     """
-    A powerful, deep encoder that processes a sequence, passes it through a bottleneck,
-    and outputs a single, low-dimensional latent vector representing the entire sequence.
+    A module that uses a set of 'agent' queries to probe a time series
+    and distill its information into a fixed-size embedding.
     """
-    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, final_embedding_dim: int):
+    def __init__(self, input_dim: int, d_model: int, nhead: int, num_agents: int):
         super().__init__()
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True
-        )
-        self.projection = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim), # Bidirectional GRU output is 2 * hidden_dim
-            nn.ReLU(),
-            nn.Linear(hidden_dim, final_embedding_dim) # Project to final low-dimensional embedding
-        )
-    
+        self.num_agents = num_agents
+        # The 'probes' or 'agents' that will query the sequence
+        self.agents = nn.Parameter(torch.randn(1, num_agents, d_model))
+        
+        # A standard transformer encoder layer to process the sequence
+        # We need to project the input into d_model dimension
+        self.input_proj = nn.Linear(input_dim, d_model)
+        # CORRECTED: Add positional encoding here, where the dimension is d_model
+        self.pos_encoder = PositionalEncoding(d_model)
+        
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+
+        # The cross-attention mechanism where agents query the encoded sequence
+        self.cross_attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, batch_first=True)
+
     def forward(self, x):
         # x shape: (batch_size, seq_len, input_dim)
-        _, h_n = self.gru(x) # h_n shape: (num_layers * 2, batch_size, hidden_dim)
         
-        # Concatenate the final forward and backward hidden states from the last layer
-        last_hidden = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1) # shape: (batch_size, hidden_dim * 2)
-        
-        embedding = self.projection(last_hidden) # shape: (batch_size, final_embedding_dim)
-        return embedding
+        # 1. Project input to the model's dimension
+        x_proj = self.input_proj(x) # -> (batch_size, seq_len, d_model)
 
-class MaskedDecoder(nn.Module):
-    """A powerful decoder that takes a single latent vector and reconstructs the original input sequence."""
-    def __init__(self, embedding_dim: int, hidden_dim: int, output_dim: int, seq_len: int, num_layers: int):
+        # 2. Add positional encoding to the projected sequence
+        x_pos = self.pos_encoder(x_proj)
+        
+        # 3. Encode the sequence
+        encoded_seq = self.transformer_encoder(x_pos) # -> (batch_size, seq_len, d_model)
+
+        # 4. Agents query the encoded sequence
+        # We need to expand agents for each item in the batch
+        batch_size = x.shape[0]
+        agent_queries = self.agents.expand(batch_size, -1, -1) # -> (batch_size, num_agents, d_model)
+
+        # The agents are the queries, the encoded sequence is the key and value
+        attn_output, _ = self.cross_attention(query=agent_queries, key=encoded_seq, value=encoded_seq)
+        # attn_output shape: (batch_size, num_agents, d_model)
+        
+        # --- MODIFIED: Return the full output of all agents, not the average ---
+        # The flattening and processing will be handled by the forecaster
+        return attn_output
+
+class ProbeForecaster(nn.Module):
+    """
+    Combines a global embedding from the probe with local features for forecasting.
+    - Global feature: A learned embedding summarizing the entire input sequence.
+    - Local feature: Raw values from the most recent N time steps (lags).
+    - Exogenous feature: Future known values (e.g., day of week for the day we are predicting).
+    """
+    def __init__(self, input_dim: int, d_model: int, nhead: int, num_agents: int, num_lags: int, num_exog: int, dropout: float = 0.1):
         super().__init__()
-        self.seq_len = seq_len
-        self.expansion_fc = nn.Linear(embedding_dim, hidden_dim * 2)
-        self.gru = nn.GRU(
-            input_size=hidden_dim * 2,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True
+        # The probe now handles its own positional encoding
+        self.probe = AgentAttentionProbe(input_dim, d_model, nhead, num_agents)
+        
+        self.num_lags = num_lags
+        
+        # --- MODIFIED: Calculate input size for the head based on the full probe output ---
+        # The probe now outputs (num_agents, d_model) for each sample.
+        probe_feature_size = num_agents * d_model
+        
+        # Calculate the size of the flattened local features
+        # Note: local features include all input dims (temp, exog)
+        local_feature_size = num_lags * input_dim
+
+        # Calculate the total input size for the forecasting head
+        forecasting_input_size = probe_feature_size + local_feature_size + num_exog
+
+        self.forecasting_head = nn.Sequential(
+            nn.Linear(forecasting_input_size, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1) 
         )
-        self.fc = nn.Linear(hidden_dim * 2, output_dim)
+
+    def forward(self, x, x_exog):
+        # x shape: (batch_size, seq_len, input_dim)
+        # x_exog shape: (batch_size, num_exog)
+        
+        # 1. Get the full agent output from the probe. 
+        # Shape: (batch_size, num_agents, d_model)
+        probe_output = self.probe(x)
+        
+        # --- MODIFIED: Flatten the probe's output to use all agent information ---
+        probe_output_flat = probe_output.reshape(probe_output.shape[0], -1)
+
+        # 2. Get local features (e.g., last N lags) from the original sequence
+        # Note: we use all input features for the lags
+        # Ensure we don't go out of bounds if seq_len < num_lags
+        actual_lags = min(self.num_lags, x.shape[1])
+        # Pad with zeros if sequence is shorter than num_lags
+        if actual_lags < self.num_lags:
+            padding = torch.zeros(x.shape[0], self.num_lags - actual_lags, x.shape[2]).to(x.device)
+            local_lags = torch.cat([padding, x], dim=1)
+        else:
+            local_lags = x[:, -self.num_lags:, :] 
+
+        # -> (batch_size, num_lags * input_dim)
+        local_lags_flat = local_lags.reshape(x.shape[0], -1)
+
+        # 3. Combine global, local, and future exogenous features
+        combined_features = torch.cat((probe_output_flat, local_lags_flat, x_exog), dim=1)
+
+        # 4. Make the prediction
+        prediction = self.forecasting_head(combined_features)
+        # --- MODIFIED: Return the flattened probe output for potential analysis ---
+        return prediction, probe_output_flat
+
+class PositionalEncoding(nn.Module):
+    """Adds positional information to the input embeddings."""
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        # x shape: (batch_size, embedding_dim)
-        x_expanded = self.expansion_fc(x)
-        x_repeated = x_expanded.unsqueeze(1).repeat(1, self.seq_len, 1)
-        outputs, _ = self.gru(x_repeated)
-        reconstruction = self.fc(outputs)
-        return reconstruction
-
-class MaskedTimeSeriesAutoencoder(nn.Module):
-    """Combines the new Encoder and Decoder for pre-training with a bottleneck."""
-    def __init__(self, input_dim: int, encoder_hidden_dim: int, encoder_layers: int, decoder_hidden_dim: int, decoder_layers: int, final_embedding_dim: int, seq_len: int):
-        super().__init__()
-        self.encoder = MaskedEncoder(
-            input_dim=input_dim, 
-            hidden_dim=encoder_hidden_dim, 
-            num_layers=encoder_layers,
-            final_embedding_dim=final_embedding_dim
-        )
-        self.decoder = MaskedDecoder(
-            embedding_dim=final_embedding_dim, 
-            hidden_dim=decoder_hidden_dim, 
-            output_dim=input_dim, 
-            seq_len=seq_len,
-            num_layers=decoder_layers
-        )
-
-    def forward(self, x_masked):
-        latent_embedding = self.encoder(x_masked)
-        reconstruction = self.decoder(latent_embedding)
-        return reconstruction
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
 
 # --- Data & Training Functions ---
 
 def get_data():
     """Loads and preprocesses the time-series data."""
-    df = pd.read_csv('data/min_daily_temps.csv')
-    df.rename(columns={'Date': 'date', 'Temp': 'temp'}, inplace=True)
+    df = pd.read_csv('data/total_cleaned.csv')
+    df.rename(columns={'日期': 'date', '成交商品件数': 'temp'}, inplace=True)
     df['date'] = pd.to_datetime(df['date'])
     df['dayofweek'] = df['date'].dt.dayofweek
     df['month'] = df['date'].dt.month
     df.sort_values('date', inplace=True)
     df.reset_index(drop=True, inplace=True)
+    # --- UPDATED: Return all relevant features ---
     return df[['temp', 'dayofweek', 'month']]
 
-def create_sequences(data, seq_len):
-    """Creates overlapping sequences from the time-series data."""
-    sequences = []
-    for i in range(len(data) - seq_len + 1):
-        sequences.append(data[i:i + seq_len])
-    return np.array(sequences)
+def create_sequences_with_exog(data, seq_len):
+    """
+    Creates overlapping sequences (X, y) for forecasting.
+    X includes all features, y is only the target variable.
+    Also returns exogenous features for the forecast step.
+    """
+    xs, ys_target, ys_exog = [], [], []
+    # data is now a numpy array
+    for i in range(len(data) - seq_len):
+        x = data[i:(i + seq_len), :]
+        y_target = data[i + seq_len, 0:1] # Target is the first column ('temp')
+        y_exog = data[i + seq_len, 1:]   # Exogenous features are the rest
+        xs.append(x)
+        ys_target.append(y_target)
+        ys_exog.append(y_exog)
+    return np.array(xs), np.array(ys_target), np.array(ys_exog)
 
-def train_masked_autoencoder(config):
-    """Main training loop for the masked autoencoder, now with validation and early stopping."""
+def train_forecaster(config):
+    """Main training loop for the supervised forecaster."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # 1. Load and prepare data
     df = get_data()
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(df)
-    
-    sequences = create_sequences(data_scaled, config['seq_len'])
-    
-    # --- Create Training and Validation Sets ---
-    # For time series, we should not shuffle. The last part of the data is the validation set.
-    split_idx = int(len(sequences) * 0.8)
-    train_sequences = sequences[:split_idx]
-    val_sequences = sequences[split_idx:]
-    
-    if len(val_sequences) == 0:
-        raise ValueError("Not enough data to create a validation set. Please use a smaller window or more data.")
 
-    train_dataset = TensorDataset(torch.FloatTensor(train_sequences))
-    val_dataset = TensorDataset(torch.FloatTensor(val_sequences))
+    # --- Create Training and Validation Sets (CORRECTED: Split before scaling) ---
+    split_idx = int(len(df) * 0.8)
+    train_df = df[:split_idx]
+    val_df = df[split_idx:]
+
+    # --- CORRECTED: Use separate scalers for target and exogenous features ---
+    target_scaler = MinMaxScaler()
+    exog_scaler = MinMaxScaler()
+
+    # Fit scalers ONLY on training data
+    # Reshape is needed for single-column data
+    train_target_scaled = target_scaler.fit_transform(train_df[['temp']])
+    train_exog_scaled = exog_scaler.fit_transform(train_df[['dayofweek', 'month']])
+    
+    # Combine scaled data for sequence creation
+    train_data_scaled = np.concatenate([train_target_scaled, train_exog_scaled], axis=1)
+
+    # Use the same scalers to transform validation data
+    val_target_scaled = target_scaler.transform(val_df[['temp']])
+    val_exog_scaled = exog_scaler.transform(val_df[['dayofweek', 'month']])
+    val_data_scaled = np.concatenate([val_target_scaled, val_exog_scaled], axis=1)
+    
+    # Create sequences for forecasting from scaled data
+    X_train, y_train_target, y_train_exog = create_sequences_with_exog(train_data_scaled, config['seq_len'])
+    X_val, y_val_target, y_val_exog = create_sequences_with_exog(val_data_scaled, config['seq_len'])
+
+    train_dataset = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train_exog), torch.FloatTensor(y_train_target))
+    val_dataset = TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val_exog), torch.FloatTensor(y_val_target))
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
     
     # 2. Initialize model and optimizer
-    model = MaskedTimeSeriesAutoencoder(
-        input_dim=df.shape[1],
-        encoder_hidden_dim=config['encoder_hidden_dim'],
-        encoder_layers=config['encoder_layers'],
-        decoder_hidden_dim=config['decoder_hidden_dim'],
-        decoder_layers=config['decoder_layers'],
-        final_embedding_dim=config['final_embedding_dim'],
-        seq_len=config['seq_len']
+    # input_dim is the number of features in the sequence
+    input_dim = X_train.shape[2] 
+    # num_exog is the number of future exogenous features
+    num_exog = y_train_exog.shape[1]
+
+    model = ProbeForecaster(
+        input_dim=input_dim,
+        d_model=config['d_model'],
+        nhead=config['nhead'],
+        num_agents=config['num_agents'],
+        num_lags=config['num_lags'],
+        num_exog=num_exog,
     ).to(device)
     
-    # We are already using the Adam optimizer as requested.
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
-    criterion = nn.MSELoss(reduction='none')
+    criterion = nn.MSELoss() 
 
     # 3. Training loop with Early Stopping
-    print("Starting masked autoencoder training with validation and early stopping...")
+    print("Starting forecaster training...")
     
     best_val_loss = float('inf')
     epochs_no_improve = 0
     best_model_state = None
 
     for epoch in range(config['epochs']):
-        # --- Training Phase ---
         model.train()
-        train_loss, train_mae = 0, 0
-        for i, (batch,) in enumerate(train_loader):
-            batch = batch.to(device)
+        train_loss = 0
+        for i, (inputs, exog_inputs, targets) in enumerate(train_loader):
+            inputs, exog_inputs, targets = inputs.to(device), exog_inputs.to(device), targets.to(device)
             optimizer.zero_grad()
             
-            # Masking
-            unmasked_indices = torch.rand(batch.shape[0], batch.shape[1], device=device) > config['mask_ratio']
-            x_masked_input = batch.clone()
-            x_masked_input[~unmasked_indices] = 0 
-
-            reconstruction = model(x_masked_input)
+            predictions, _ = model(inputs, exog_inputs)
+            loss = criterion(predictions, targets)
             
-            # Calculate loss only on masked elements
-            loss_mask = (~unmasked_indices).unsqueeze(-1).expand_as(reconstruction)
-            masked_loss_elements = (reconstruction - batch)[loss_mask]
-            
-            if masked_loss_elements.numel() > 0:
-                loss = (masked_loss_elements ** 2).mean() # MSE
-                
-                with torch.no_grad():
-                    mae = torch.abs(masked_loss_elements).mean()
-
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-                train_mae += mae.item()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
         
         avg_train_loss = train_loss / (i + 1)
-        avg_train_mae = train_mae / (i + 1)
         
         # --- Validation Phase ---
         model.eval()
-        val_loss, val_mae = 0, 0
+        val_loss = 0
         with torch.no_grad():
-            for i, (batch,) in enumerate(val_loader):
-                batch = batch.to(device)
-                
-                # Same masking for consistency
-                unmasked_indices = torch.rand(batch.shape[0], batch.shape[1], device=device) > config['mask_ratio']
-                x_masked_input = batch.clone()
-                x_masked_input[~unmasked_indices] = 0
-
-                reconstruction = model(x_masked_input)
-                
-                loss_mask = (~unmasked_indices).unsqueeze(-1).expand_as(reconstruction)
-                masked_loss_elements = (reconstruction - batch)[loss_mask]
-                
-                if masked_loss_elements.numel() > 0:
-                    loss = (masked_loss_elements ** 2).mean()
-                    mae = torch.abs(masked_loss_elements).mean()
-                    val_loss += loss.item()
-                    val_mae += mae.item()
+            for i, (inputs, exog_inputs, targets) in enumerate(val_loader):
+                inputs, exog_inputs, targets = inputs.to(device), exog_inputs.to(device), targets.to(device)
+                predictions, _ = model(inputs, exog_inputs)
+                loss = criterion(predictions, targets)
+                val_loss += loss.item()
 
         avg_val_loss = val_loss / (i + 1)
-        avg_val_mae = val_mae / (i + 1)
 
         print(f"Epoch [{epoch+1}/{config['epochs']}] | "
-              f"Train Loss: {avg_train_loss:.6f}, Train MAE: {avg_train_mae:.6f} | "
-              f"Val Loss: {avg_val_loss:.6f}, Val MAE: {avg_val_mae:.6f}")
+              f"Train Loss: {avg_train_loss:.6f} | "
+              f"Val Loss: {avg_val_loss:.6f}")
 
         # --- Early Stopping Check ---
         if avg_val_loss < best_val_loss:
@@ -234,162 +288,90 @@ def train_masked_autoencoder(config):
             
     print("Training finished.")
     
-    # Load the best performing model
     if best_model_state:
         model.load_state_dict(best_model_state)
         print("Loaded best model state from early stopping.")
 
-    # Pass train_loader for visualization as it's typically larger and more representative
-    return model.to('cpu'), scaler, train_loader
+    # CORRECTED: Return target_scaler for proper inverse transformation
+    return model.to('cpu'), target_scaler, val_loader # Return val_loader for visualization
 
-def downsample_series(series, factor):
-    """Downsamples a 1D series by averaging over a factor."""
-    if len(series) < factor:
-        return np.array([series.mean()])
-    
-    # Trim the series to be divisible by the factor
-    trimmed_len = (len(series) // factor) * factor
-    trimmed_series = series[:trimmed_len]
-    
-    # Reshape and take the mean over the new axis
-    return trimmed_series.reshape(-1, factor).mean(axis=1)
-
-def visualize_reconstruction(model, scaler, loader, config, n_samples=3):
-    """Visualizes how well the model reconstructs masked sequences at multiple resolutions."""
-    print(f"\n--- Generating visualization for seq_len={config['seq_len']} ---")
+def visualize_predictions(model, target_scaler, loader, config, n_samples=20):
+    """
+    Visualizes model predictions against actual values.
+    CORRECTED: Uses the dedicated target_scaler for inverse transform.
+    """
+    print(f"\n--- Generating forecast visualization for seq_len={config['seq_len']} ---")
     model.eval()
-    device = torch.device('cpu')
-    model.to(device)
-
-    # Get a single batch of data
-    batch, = next(iter(loader))
-    original_seqs = batch[:n_samples]
-
-    # Create the same kind of mask
-    mask_ratio = config['mask_ratio']
-    # Use a fixed seed for consistent visualization
-    torch.manual_seed(42)
-    noise = torch.rand(original_seqs.shape[0], original_seqs.shape[1])
-    unmasked_indices = noise > mask_ratio
     
-    x_masked_input = original_seqs.clone()
-    x_masked_input[~unmasked_indices] = 0
-
+    all_preds = []
+    all_targets = []
+    # The loader now yields batches of (inputs, exog_inputs, targets)
     with torch.no_grad():
-        reconstructed_seqs = model(x_masked_input)
+        for inputs, exog_inputs, targets in loader:
+            predictions, _ = model(inputs, exog_inputs)
+            all_preds.append(predictions.cpu().numpy())
+            all_targets.append(targets.cpu().numpy())
 
-    # Inverse transform for plotting
-    original_unscaled = np.array([scaler.inverse_transform(s) for s in original_seqs])
-    reconstructed_unscaled = np.array([scaler.inverse_transform(s) for s in reconstructed_seqs])
+    # Concatenate all batches
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_targets = np.concatenate(all_targets, axis=0)
     
-    # Plotting
+    # --- CORRECTED: Inverse transform using the dedicated target_scaler ---
+    # No need for dummy arrays anymore.
+    actual_values = target_scaler.inverse_transform(all_targets)
+    predicted_values = target_scaler.inverse_transform(all_preds)
+    
+    # Squeeze the arrays to be 1D for metrics and plotting
+    actual_values = actual_values.squeeze()
+    predicted_values = predicted_values.squeeze()
+    
+    # Calculate metrics over the ENTIRE validation set
+    r2 = r2_score(actual_values, predicted_values)
+    mae = mean_absolute_error(actual_values, predicted_values)
+
+    # Plotting (show a limited number of samples for clarity)
     plt.style.use('seaborn-v0_8-whitegrid')
-    # Create a figure with 3 rows per sample (daily, weekly, monthly)
-    fig, axes = plt.subplots(
-        nrows=n_samples, 
-        ncols=3, 
-        figsize=(20, 5 * n_samples), 
-        sharex=False
-    )
-    if n_samples == 1:
-        axes = np.array([axes]) # Make it a 2D array for consistent indexing
+    plt.figure(figsize=(15, 7))
+    
+    plot_actuals = actual_values[:n_samples]
+    plot_preds = predicted_values[:n_samples]
 
-    fig.suptitle(f"Multi-Scale Reconstruction (Window: {config['seq_len']} days -> {config['final_embedding_dim']} dims)", fontsize=20, y=1.02)
-
-    for i in range(n_samples):
-        original_temp = original_unscaled[i, :, 0]
-        reconstructed_temp = reconstructed_unscaled[i, :, 0]
-        
-        # --- 1. Daily (High-Resolution) Analysis ---
-        ax_daily = axes[i, 0]
-        mae_daily = mean_absolute_error(original_temp, reconstructed_temp)
-        time_steps_daily = np.arange(len(original_temp))
-        
-        ax_daily.plot(time_steps_daily, original_temp, label='Original', color='dodgerblue', zorder=2)
-        ax_daily.plot(time_steps_daily, reconstructed_temp, label='Reconstructed', color='orangered', linestyle='--', zorder=3)
-        
-        # Highlight masked area
-        masked_steps = time_steps_daily[~unmasked_indices[i]]
-        for t in masked_steps:
-             ax_daily.axvspan(t - 0.5, t + 0.5, color='gray', alpha=0.15, zorder=1)
-        ax_daily.plot([], [], color='gray', alpha=0.2, linewidth=10, label=f'Masked Area')
-        
-        ax_daily.set_title(f"Sample {i+1}: Daily Detail\nMAE: {mae_daily:.3f}", fontsize=12)
-        ax_daily.legend()
-        ax_daily.set_ylabel("Temp")
-
-        # --- 2. Weekly (Mid-Resolution) Analysis ---
-        ax_weekly = axes[i, 1]
-        original_weekly = downsample_series(original_temp, 7)
-        reconstructed_weekly = downsample_series(reconstructed_temp, 7)
-        mae_weekly = mean_absolute_error(original_weekly, reconstructed_weekly)
-        time_steps_weekly = np.arange(len(original_weekly))
-        
-        ax_weekly.plot(time_steps_weekly, original_weekly, label='Original (Weekly Avg)', color='dodgerblue')
-        ax_weekly.plot(time_steps_weekly, reconstructed_weekly, label='Reconstructed (Weekly Avg)', color='orangered', linestyle='--')
-        ax_weekly.set_title(f"Weekly Average\nMAE: {mae_weekly:.3f}", fontsize=12)
-        ax_weekly.legend()
-        ax_weekly.set_xlabel("Weeks")
-
-        # --- 3. Monthly (Low-Resolution) Analysis ---
-        ax_monthly = axes[i, 2]
-        original_monthly = downsample_series(original_temp, 30)
-        reconstructed_monthly = downsample_series(reconstructed_temp, 30)
-        mae_monthly = mean_absolute_error(original_monthly, reconstructed_monthly)
-        time_steps_monthly = np.arange(len(original_monthly))
-
-        ax_monthly.plot(time_steps_monthly, original_monthly, label='Original (Monthly Avg)', color='dodgerblue')
-        ax_monthly.plot(time_steps_monthly, reconstructed_monthly, label='Reconstructed (Monthly Avg)', color='orangered', linestyle='--')
-        ax_monthly.set_title(f"Monthly Average\nMAE: {mae_monthly:.3f}", fontsize=12)
-        ax_monthly.legend()
-        ax_monthly.set_xlabel("Months")
-
-        print(f"  Sample {i+1}: Daily MAE={mae_daily:.4f}, Weekly MAE={mae_weekly:.4f}, Monthly MAE={mae_monthly:.4f}")
-
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    time_steps = np.arange(len(plot_actuals))
+    plt.plot(time_steps, plot_actuals, 'o-', label='Actual Values', color='dodgerblue')
+    plt.plot(time_steps, plot_preds, 'o--', label='Predicted Values', color='orangered')
+    
+    plt.title(f"Forecaster Performance on Validation Set\n$R^2 = {r2:.3f}$ | MAE = {mae:.2f}", fontsize=16)
+    plt.xlabel(f"Sample Index from Validation Set (showing first {n_samples})")
+    plt.ylabel("Value")
+    plt.legend()
+    plt.tight_layout()
     
     # Save the plot
     os.makedirs("plots", exist_ok=True)
-    plot_path = f"plots/reconstruction_len{config['seq_len']}.png"
+    plot_path = f"plots/forecaster_performance_len{config['seq_len']}.png"
     plt.savefig(plot_path)
-    print(f"\n✅ Reconstruction plot saved to {plot_path}")
+    print(f"\n✅ Forecast plot saved to {plot_path}")
     plt.show()
 
 def main():
-    base_config = {
-        # Encoder is the main workhorse
-        'encoder_hidden_dim': 256, # Increased capacity for longer sequences
-        'encoder_layers': 4,
-        # Decoder is also powerful to handle reconstruction from a small vector
-        'decoder_hidden_dim': 128,
-        'decoder_layers': 2,
-        'final_embedding_dim': 32, # The single, compressed, low-dimensional representation
-        'epochs': 50, # Max epochs; early stopping will likely trigger before this
-        'patience': 10, # Number of epochs to wait for improvement before stopping
-        'batch_size': 32, 
-        'learning_rate': 0.0005,
-        'mask_ratio': 0.4
+    config = {
+        'seq_len': 365,         # Capture full annual seasonality
+        'd_model': 64,
+        'nhead': 4,             
+        'num_agents': 8,        
+        'num_lags': 14,         # Use last 14 days as direct local features
+        'epochs': 150,          # More epochs for more complex data
+        'patience': 25,         # More patience
+        'batch_size': 32,
+        'learning_rate': 0.0005
     }
     
-    # --- Experiment Loop for Different Window Sizes ---
-    window_sizes = [365, 1000, 3000]
-
-    for window in window_sizes:
-        print("\n" + "="*80)
-        print(f"🚀 STARTING EXPERIMENT FOR WINDOW SIZE: {window} days")
-        print("="*80)
-        
-        config = base_config.copy()
-        config['seq_len'] = window
-        
-        # Check if data is sufficient for the window size
-        df_len = len(get_data())
-        if df_len < window:
-            print(f"⚠️ Skipping window size {window}: Not enough data (requires {window}, have {df_len}).")
-            continue
-
-        trained_model, scaler, loader = train_masked_autoencoder(config)
-        visualize_reconstruction(trained_model, scaler, loader, config)
+    print("\n" + "="*80)
+    print(f"🚀 STARTING HYBRID PROBE EXPERIMENT (Window: {config['seq_len']}, Agents: {config['num_agents']}, Lags: {config['num_lags']}, Exog: True)")
+    print("="*80)
+    
+    trained_model, target_scaler, loader = train_forecaster(config)
+    visualize_predictions(trained_model, target_scaler, loader, config)
 
 if __name__ == "__main__":
     main() 

@@ -1,0 +1,576 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_LGBM_Probe",
+    "best_score_during_search": 0.4034764505591475,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_fourier_features",
+            "columns": [
+                "date"
+            ],
+            "periods": [
+                7,
+                365
+            ],
+            "id": "Fourier_Weekly_Yearly"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "dayofweek",
+                "is_weekend"
+            ],
+            "id": "Interaction_Day_Weekend"
+        },
+        {
+            "operation": "create_fourier_features",
+            "date_column": "date",
+            "id": "Fourier_Seasonality"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 90,
+            "id": "LE_Quarterly"
+        },
+        {
+            "operation": "create_pca_embedding",
+            "features_prefix": "embed_LE_Quarterly",
+            "n_components": 8,
+            "id": "PCA_Quarterly"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly_Enhanced"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "month",
+                "dayofweek"
+            ],
+            "id": "Month_Dayofweek_Interaction"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 90,
+            "id": "LE_Quarterly_Enhanced"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "dayofweek",
+                "is_weekend"
+            ],
+            "id": "Day_Weekend_Enhanced_Interaction"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly_Enhanced_v2"
+        },
+        {
+            "operation": "create_pca_embedding",
+            "features_prefix": "embed_LE_Yearly_Enhanced_v2",
+            "n_components": 8,
+            "id": "PCA_Yearly_Enhanced_v2"
+        },
+        {
+            "operation": "create_fourier_features",
+            "periods": [
+                365,
+                730
+            ],
+            "id": "Fourier_Yearly_BiYearly"
+        },
+        {
+            "operation": "create_interaction",
+            "features": [
+                "dayofweek",
+                "weekofyear"
+            ],
+            "id": "Day_WeekofYear_Interaction"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "dayofweek_x_is_weekend_Interaction_Day_Weekend",
+        "embed_0_LE_Yearly",
+        "embed_1_LE_Yearly",
+        "embed_2_LE_Yearly",
+        "embed_3_LE_Yearly",
+        "embed_4_LE_Yearly",
+        "embed_5_LE_Yearly",
+        "embed_6_LE_Yearly",
+        "embed_7_LE_Yearly",
+        "embed_8_LE_Yearly",
+        "embed_9_LE_Yearly",
+        "embed_10_LE_Yearly",
+        "embed_11_LE_Yearly",
+        "embed_12_LE_Yearly",
+        "embed_13_LE_Yearly",
+        "embed_14_LE_Yearly",
+        "embed_15_LE_Yearly",
+        "embed_16_LE_Yearly",
+        "embed_17_LE_Yearly",
+        "embed_18_LE_Yearly",
+        "embed_19_LE_Yearly",
+        "embed_20_LE_Yearly",
+        "embed_21_LE_Yearly",
+        "embed_22_LE_Yearly",
+        "embed_23_LE_Yearly",
+        "embed_24_LE_Yearly",
+        "embed_25_LE_Yearly",
+        "embed_26_LE_Yearly",
+        "embed_27_LE_Yearly",
+        "embed_28_LE_Yearly",
+        "embed_29_LE_Yearly",
+        "embed_30_LE_Yearly",
+        "embed_31_LE_Yearly",
+        "embed_0_LE_Quarterly",
+        "embed_1_LE_Quarterly",
+        "embed_2_LE_Quarterly",
+        "embed_3_LE_Quarterly",
+        "embed_4_LE_Quarterly",
+        "embed_5_LE_Quarterly",
+        "embed_6_LE_Quarterly",
+        "embed_7_LE_Quarterly",
+        "embed_8_LE_Quarterly",
+        "embed_9_LE_Quarterly",
+        "embed_10_LE_Quarterly",
+        "embed_11_LE_Quarterly",
+        "embed_12_LE_Quarterly",
+        "embed_13_LE_Quarterly",
+        "embed_14_LE_Quarterly",
+        "embed_15_LE_Quarterly",
+        "embed_16_LE_Quarterly",
+        "embed_17_LE_Quarterly",
+        "embed_18_LE_Quarterly",
+        "embed_19_LE_Quarterly",
+        "embed_20_LE_Quarterly",
+        "embed_21_LE_Quarterly",
+        "embed_22_LE_Quarterly",
+        "embed_23_LE_Quarterly",
+        "embed_24_LE_Quarterly",
+        "embed_25_LE_Quarterly",
+        "embed_26_LE_Quarterly",
+        "embed_27_LE_Quarterly",
+        "embed_28_LE_Quarterly",
+        "embed_29_LE_Quarterly",
+        "embed_30_LE_Quarterly",
+        "embed_31_LE_Quarterly",
+        "embed_0_LE_Yearly_Enhanced",
+        "embed_1_LE_Yearly_Enhanced",
+        "embed_2_LE_Yearly_Enhanced",
+        "embed_3_LE_Yearly_Enhanced",
+        "embed_4_LE_Yearly_Enhanced",
+        "embed_5_LE_Yearly_Enhanced",
+        "embed_6_LE_Yearly_Enhanced",
+        "embed_7_LE_Yearly_Enhanced",
+        "embed_8_LE_Yearly_Enhanced",
+        "embed_9_LE_Yearly_Enhanced",
+        "embed_10_LE_Yearly_Enhanced",
+        "embed_11_LE_Yearly_Enhanced",
+        "embed_12_LE_Yearly_Enhanced",
+        "embed_13_LE_Yearly_Enhanced",
+        "embed_14_LE_Yearly_Enhanced",
+        "embed_15_LE_Yearly_Enhanced",
+        "embed_16_LE_Yearly_Enhanced",
+        "embed_17_LE_Yearly_Enhanced",
+        "embed_18_LE_Yearly_Enhanced",
+        "embed_19_LE_Yearly_Enhanced",
+        "embed_20_LE_Yearly_Enhanced",
+        "embed_21_LE_Yearly_Enhanced",
+        "embed_22_LE_Yearly_Enhanced",
+        "embed_23_LE_Yearly_Enhanced",
+        "embed_24_LE_Yearly_Enhanced",
+        "embed_25_LE_Yearly_Enhanced",
+        "embed_26_LE_Yearly_Enhanced",
+        "embed_27_LE_Yearly_Enhanced",
+        "embed_28_LE_Yearly_Enhanced",
+        "embed_29_LE_Yearly_Enhanced",
+        "embed_30_LE_Yearly_Enhanced",
+        "embed_31_LE_Yearly_Enhanced",
+        "month_x_dayofweek_Month_Dayofweek_Interaction",
+        "embed_0_LE_Quarterly_Enhanced",
+        "embed_1_LE_Quarterly_Enhanced",
+        "embed_2_LE_Quarterly_Enhanced",
+        "embed_3_LE_Quarterly_Enhanced",
+        "embed_4_LE_Quarterly_Enhanced",
+        "embed_5_LE_Quarterly_Enhanced",
+        "embed_6_LE_Quarterly_Enhanced",
+        "embed_7_LE_Quarterly_Enhanced",
+        "embed_8_LE_Quarterly_Enhanced",
+        "embed_9_LE_Quarterly_Enhanced",
+        "embed_10_LE_Quarterly_Enhanced",
+        "embed_11_LE_Quarterly_Enhanced",
+        "embed_12_LE_Quarterly_Enhanced",
+        "embed_13_LE_Quarterly_Enhanced",
+        "embed_14_LE_Quarterly_Enhanced",
+        "embed_15_LE_Quarterly_Enhanced",
+        "embed_16_LE_Quarterly_Enhanced",
+        "embed_17_LE_Quarterly_Enhanced",
+        "embed_18_LE_Quarterly_Enhanced",
+        "embed_19_LE_Quarterly_Enhanced",
+        "embed_20_LE_Quarterly_Enhanced",
+        "embed_21_LE_Quarterly_Enhanced",
+        "embed_22_LE_Quarterly_Enhanced",
+        "embed_23_LE_Quarterly_Enhanced",
+        "embed_24_LE_Quarterly_Enhanced",
+        "embed_25_LE_Quarterly_Enhanced",
+        "embed_26_LE_Quarterly_Enhanced",
+        "embed_27_LE_Quarterly_Enhanced",
+        "embed_28_LE_Quarterly_Enhanced",
+        "embed_29_LE_Quarterly_Enhanced",
+        "embed_30_LE_Quarterly_Enhanced",
+        "embed_31_LE_Quarterly_Enhanced",
+        "dayofweek_x_is_weekend_Day_Weekend_Enhanced_Interaction",
+        "embed_0_LE_Yearly_Enhanced_v2",
+        "embed_1_LE_Yearly_Enhanced_v2",
+        "embed_2_LE_Yearly_Enhanced_v2",
+        "embed_3_LE_Yearly_Enhanced_v2",
+        "embed_4_LE_Yearly_Enhanced_v2",
+        "embed_5_LE_Yearly_Enhanced_v2",
+        "embed_6_LE_Yearly_Enhanced_v2",
+        "embed_7_LE_Yearly_Enhanced_v2",
+        "embed_8_LE_Yearly_Enhanced_v2",
+        "embed_9_LE_Yearly_Enhanced_v2",
+        "embed_10_LE_Yearly_Enhanced_v2",
+        "embed_11_LE_Yearly_Enhanced_v2",
+        "embed_12_LE_Yearly_Enhanced_v2",
+        "embed_13_LE_Yearly_Enhanced_v2",
+        "embed_14_LE_Yearly_Enhanced_v2",
+        "embed_15_LE_Yearly_Enhanced_v2",
+        "embed_16_LE_Yearly_Enhanced_v2",
+        "embed_17_LE_Yearly_Enhanced_v2",
+        "embed_18_LE_Yearly_Enhanced_v2",
+        "embed_19_LE_Yearly_Enhanced_v2",
+        "embed_20_LE_Yearly_Enhanced_v2",
+        "embed_21_LE_Yearly_Enhanced_v2",
+        "embed_22_LE_Yearly_Enhanced_v2",
+        "embed_23_LE_Yearly_Enhanced_v2",
+        "embed_24_LE_Yearly_Enhanced_v2",
+        "embed_25_LE_Yearly_Enhanced_v2",
+        "embed_26_LE_Yearly_Enhanced_v2",
+        "embed_27_LE_Yearly_Enhanced_v2",
+        "embed_28_LE_Yearly_Enhanced_v2",
+        "embed_29_LE_Yearly_Enhanced_v2",
+        "embed_30_LE_Yearly_Enhanced_v2",
+        "embed_31_LE_Yearly_Enhanced_v2",
+        "dayofweek_x_weekofyear_Day_WeekofYear_Interaction"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.38939573931956084,
+            "mae": 32346.177442406868,
+            "rmse": 69270.61179448634
+        },
+        "RandomForest": {
+            "r2": 0.33948808210694104,
+            "mae": 31627.72258312021,
+            "rmse": 72045.92758114448
+        },
+        "XGBoost": {
+            "r2": 0.11975918122131557,
+            "mae": 38020.06645620205,
+            "rmse": 83170.60489286925
+        },
+        "CatBoost": {
+            "r2": 0.3474338130585566,
+            "mae": 30957.576017754167,
+            "rmse": 71611.27258723941
+        },
+        "TabNet": {
+            "r2": -0.8912897740588144,
+            "mae": 83799.27323596495,
+            "rmse": 121912.47420093759
+        },
+        "SimpleNN": {
+            "r2": 0.26343731214961297,
+            "mae": 34465.987581921356,
+            "rmse": 76080.60642095962
+        },
+        "EnhancedNN": {
+            "r2": 0.2419406961777295,
+            "mae": 32569.873951007034,
+            "rmse": 77182.83014620411
+        },
+        "Transformer": {
+            "r2": 0.33180755239408244,
+            "mae": 31652.273462476023,
+            "rmse": 72463.59722973069
+        }
+    },
+    "best_final_model": {
+        "name": "LightGBM",
+        "metrics": {
+            "r2": 0.38939573931956084,
+            "mae": 32346.177442406868,
+            "rmse": 69270.61179448634
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "columns": [
+                        "date"
+                    ],
+                    "periods": [
+                        7,
+                        365
+                    ],
+                    "id": "Fourier_Weekly_Yearly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "dayofweek",
+                        "is_weekend"
+                    ],
+                    "id": "Interaction_Day_Weekend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.313255566357443,
+                "r2_score": 0.313255566357443,
+                "num_features": 6
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "date_column": "date",
+                    "id": "Fourier_Seasonality"
+                },
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3894164185775707,
+                "r2_score": 0.3894164185775707,
+                "num_features": 38
+            },
+            "adopted": true,
+            "reward": 0.0761608522201277
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "features_prefix": "embed_LE_BiYearly",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.38160680797526403,
+                "r2_score": 0.38160680797526403,
+                "num_features": 70
+            },
+            "adopted": false,
+            "reward": -0.007809610602306671
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "features_prefix": "embed_LE_Quarterly",
+                    "n_components": 8,
+                    "id": "PCA_Quarterly"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3897222696304943,
+                "r2_score": 0.3897222696304943,
+                "num_features": 70
+            },
+            "adopted": true,
+            "reward": 0.00030585105292357806
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly_Enhanced"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "month",
+                        "dayofweek"
+                    ],
+                    "id": "Month_Dayofweek_Interaction"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.40150705034294365,
+                "r2_score": 0.40150705034294365,
+                "num_features": 103
+            },
+            "adopted": true,
+            "reward": 0.011784780712449372
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_Enhanced"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "features_prefix": "embed_LE_BiYearly_Enhanced",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly_Enhanced"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37959731034897515,
+                "r2_score": 0.37959731034897515,
+                "num_features": 135
+            },
+            "adopted": false,
+            "reward": -0.021909739993968502
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_Enhanced"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "features_prefix": "embed_LE_BiYearly_Enhanced",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly_Enhanced"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37959731034897515,
+                "r2_score": 0.37959731034897515,
+                "num_features": 135
+            },
+            "adopted": false,
+            "reward": -0.021909739993968502
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_Enhanced"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "dayofweek",
+                        "is_weekend"
+                    ],
+                    "id": "Day_Weekend_Enhanced_Interaction"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.40150705034294365,
+                "r2_score": 0.40150705034294365,
+                "num_features": 136
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly_Enhanced_v2"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "features_prefix": "embed_LE_Yearly_Enhanced_v2",
+                    "n_components": 8,
+                    "id": "PCA_Yearly_Enhanced_v2"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.40150705034294365,
+                "r2_score": 0.40150705034294365,
+                "num_features": 168
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "periods": [
+                        365,
+                        730
+                    ],
+                    "id": "Fourier_Yearly_BiYearly"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "dayofweek",
+                        "weekofyear"
+                    ],
+                    "id": "Day_WeekofYear_Interaction"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.4034764505591475,
+                "r2_score": 0.4034764505591475,
+                "num_features": 169
+            },
+            "adopted": true,
+            "reward": 0.0019694002162038426
+        }
+    ]
+}

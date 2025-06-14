@@ -1,0 +1,443 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_LGBM_Probe",
+    "best_score_during_search": 0.3985903840399039,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_fourier_features",
+            "id": "Fourier_Date"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 90,
+            "id": "LE_Quarterly"
+        },
+        {
+            "operation": "create_pca_embedding",
+            "source_id": "LE_Quarterly",
+            "n_components": 8,
+            "id": "PCA_Quarterly"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 730,
+            "id": "LE_BiYearly"
+        },
+        {
+            "operation": "create_pca_embedding",
+            "source_id": "LE_BiYearly",
+            "n_components": 8,
+            "id": "PCA_BiYearly"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "embed_0_LE_Yearly",
+        "embed_1_LE_Yearly",
+        "embed_2_LE_Yearly",
+        "embed_3_LE_Yearly",
+        "embed_4_LE_Yearly",
+        "embed_5_LE_Yearly",
+        "embed_6_LE_Yearly",
+        "embed_7_LE_Yearly",
+        "embed_8_LE_Yearly",
+        "embed_9_LE_Yearly",
+        "embed_10_LE_Yearly",
+        "embed_11_LE_Yearly",
+        "embed_12_LE_Yearly",
+        "embed_13_LE_Yearly",
+        "embed_14_LE_Yearly",
+        "embed_15_LE_Yearly",
+        "embed_16_LE_Yearly",
+        "embed_17_LE_Yearly",
+        "embed_18_LE_Yearly",
+        "embed_19_LE_Yearly",
+        "embed_20_LE_Yearly",
+        "embed_21_LE_Yearly",
+        "embed_22_LE_Yearly",
+        "embed_23_LE_Yearly",
+        "embed_24_LE_Yearly",
+        "embed_25_LE_Yearly",
+        "embed_26_LE_Yearly",
+        "embed_27_LE_Yearly",
+        "embed_28_LE_Yearly",
+        "embed_29_LE_Yearly",
+        "embed_30_LE_Yearly",
+        "embed_31_LE_Yearly",
+        "embed_0_LE_Quarterly",
+        "embed_1_LE_Quarterly",
+        "embed_2_LE_Quarterly",
+        "embed_3_LE_Quarterly",
+        "embed_4_LE_Quarterly",
+        "embed_5_LE_Quarterly",
+        "embed_6_LE_Quarterly",
+        "embed_7_LE_Quarterly",
+        "embed_8_LE_Quarterly",
+        "embed_9_LE_Quarterly",
+        "embed_10_LE_Quarterly",
+        "embed_11_LE_Quarterly",
+        "embed_12_LE_Quarterly",
+        "embed_13_LE_Quarterly",
+        "embed_14_LE_Quarterly",
+        "embed_15_LE_Quarterly",
+        "embed_16_LE_Quarterly",
+        "embed_17_LE_Quarterly",
+        "embed_18_LE_Quarterly",
+        "embed_19_LE_Quarterly",
+        "embed_20_LE_Quarterly",
+        "embed_21_LE_Quarterly",
+        "embed_22_LE_Quarterly",
+        "embed_23_LE_Quarterly",
+        "embed_24_LE_Quarterly",
+        "embed_25_LE_Quarterly",
+        "embed_26_LE_Quarterly",
+        "embed_27_LE_Quarterly",
+        "embed_28_LE_Quarterly",
+        "embed_29_LE_Quarterly",
+        "embed_30_LE_Quarterly",
+        "embed_31_LE_Quarterly",
+        "pca_0_PCA_Quarterly",
+        "pca_1_PCA_Quarterly",
+        "pca_2_PCA_Quarterly",
+        "pca_3_PCA_Quarterly",
+        "pca_4_PCA_Quarterly",
+        "pca_5_PCA_Quarterly",
+        "pca_6_PCA_Quarterly",
+        "pca_7_PCA_Quarterly",
+        "embed_0_LE_BiYearly",
+        "embed_1_LE_BiYearly",
+        "embed_2_LE_BiYearly",
+        "embed_3_LE_BiYearly",
+        "embed_4_LE_BiYearly",
+        "embed_5_LE_BiYearly",
+        "embed_6_LE_BiYearly",
+        "embed_7_LE_BiYearly",
+        "embed_8_LE_BiYearly",
+        "embed_9_LE_BiYearly",
+        "embed_10_LE_BiYearly",
+        "embed_11_LE_BiYearly",
+        "embed_12_LE_BiYearly",
+        "embed_13_LE_BiYearly",
+        "embed_14_LE_BiYearly",
+        "embed_15_LE_BiYearly",
+        "embed_16_LE_BiYearly",
+        "embed_17_LE_BiYearly",
+        "embed_18_LE_BiYearly",
+        "embed_19_LE_BiYearly",
+        "embed_20_LE_BiYearly",
+        "embed_21_LE_BiYearly",
+        "embed_22_LE_BiYearly",
+        "embed_23_LE_BiYearly",
+        "embed_24_LE_BiYearly",
+        "embed_25_LE_BiYearly",
+        "embed_26_LE_BiYearly",
+        "embed_27_LE_BiYearly",
+        "embed_28_LE_BiYearly",
+        "embed_29_LE_BiYearly",
+        "embed_30_LE_BiYearly",
+        "embed_31_LE_BiYearly",
+        "pca_0_PCA_BiYearly",
+        "pca_1_PCA_BiYearly",
+        "pca_2_PCA_BiYearly",
+        "pca_3_PCA_BiYearly",
+        "pca_4_PCA_BiYearly",
+        "pca_5_PCA_BiYearly",
+        "pca_6_PCA_BiYearly",
+        "pca_7_PCA_BiYearly"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.40413955055280326,
+            "mae": 32416.707135338165,
+            "rmse": 68429.18823364275
+        },
+        "RandomForest": {
+            "r2": 0.19822961383549975,
+            "mae": 35794.53373401534,
+            "rmse": 79376.8963238466
+        },
+        "XGBoost": {
+            "r2": 0.06535766391710862,
+            "mae": 39255.61167279412,
+            "rmse": 85702.17280339831
+        },
+        "CatBoost": {
+            "r2": 0.29944775094650555,
+            "mae": 34509.58937499885,
+            "rmse": 74197.51733868972
+        },
+        "TabNet": {
+            "r2": -0.8929985663999569,
+            "mae": 83796.97218589099,
+            "rmse": 121967.5361145043
+        },
+        "SimpleNN": {
+            "r2": 0.30383121455965967,
+            "mae": 33198.078304827366,
+            "rmse": 73965.0204132951
+        },
+        "EnhancedNN": {
+            "r2": 0.27542485888518575,
+            "mae": 32422.52201886189,
+            "rmse": 75458.96136302923
+        },
+        "Transformer": {
+            "r2": 0.27972155239382857,
+            "mae": 32693.430117087595,
+            "rmse": 75234.89480357191
+        }
+    },
+    "best_final_model": {
+        "name": "LightGBM",
+        "metrics": {
+            "r2": 0.40413955055280326,
+            "mae": 32416.707135338165,
+            "rmse": 68429.18823364275
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "id": "Fourier_Date"
+                },
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3894164185775707,
+                "r2_score": 0.3894164185775707,
+                "num_features": 37
+            },
+            "adopted": true,
+            "reward": 0.0761608522201277
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly",
+                    "n_components": 8,
+                    "id": "PCA_Quarterly"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.39495020488879395,
+                "r2_score": 0.39495020488879395,
+                "num_features": 77
+            },
+            "adopted": true,
+            "reward": 0.005533786311223254
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3985903840399039,
+                "r2_score": 0.3985903840399039,
+                "num_features": 117
+            },
+            "adopted": true,
+            "reward": 0.0036401791511099235
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly_Trend"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Yearly_Trend",
+                    "n_components": 6,
+                    "id": "PCA_Yearly_Trend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.36499936719364745,
+                "r2_score": 0.36499936719364745,
+                "num_features": 155
+            },
+            "adopted": false,
+            "reward": -0.03359101684625643
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "id": "Fourier_Date"
+                },
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_Trend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3985903840399039,
+                "r2_score": 0.3985903840399039,
+                "num_features": 149
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_Trend"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_Trend",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly_Trend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3985903840399039,
+                "r2_score": 0.3985903840399039,
+                "num_features": 189
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_Trend"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_Trend",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly_Trend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3985903840399039,
+                "r2_score": 0.3985903840399039,
+                "num_features": 189
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_Trend"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_Trend",
+                    "n_components": 8,
+                    "id": "PCA_BiYearly_Trend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3985903840399039,
+                "r2_score": 0.3985903840399039,
+                "num_features": 189
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_Trend"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly_Trend",
+                    "n_components": 6,
+                    "id": "PCA_Quarterly_Trend"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3985903840399039,
+                "r2_score": 0.3985903840399039,
+                "num_features": 195
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "id": "Fourier_Date"
+                },
+                {
+                    "operation": "create_interaction",
+                    "features": [
+                        "dayofweek",
+                        "month"
+                    ],
+                    "id": "Interaction_DayMonth"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3852327439105039,
+                "r2_score": 0.3852327439105039,
+                "num_features": 196
+            },
+            "adopted": false,
+            "reward": -0.013357640129399995
+        }
+    ]
+}

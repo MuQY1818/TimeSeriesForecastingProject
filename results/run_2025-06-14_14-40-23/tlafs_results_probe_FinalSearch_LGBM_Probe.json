@@ -1,0 +1,381 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_LGBM_Probe",
+    "best_score_during_search": 0.37695880711579965,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 365,
+            "id": "LE_Yearly_v1"
+        },
+        {
+            "operation": "create_pca_embedding",
+            "source_id": "LE_Yearly_v1",
+            "n_components": 4,
+            "id": "PCA_Yearly_v1"
+        },
+        {
+            "operation": "delete_feature",
+            "source_id": "LE_Yearly_v1"
+        },
+        {
+            "operation": "create_learned_embedding",
+            "window": 90,
+            "id": "LE_Quarterly_v1"
+        },
+        {
+            "operation": "create_pca_embedding",
+            "source_id": "LE_Quarterly_v1",
+            "n_components": 4,
+            "id": "PCA_Quarterly_v1"
+        },
+        {
+            "operation": "delete_feature",
+            "source_id": "LE_Quarterly_v1"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "pca_0_PCA_Yearly_v1",
+        "pca_1_PCA_Yearly_v1",
+        "pca_2_PCA_Yearly_v1",
+        "pca_3_PCA_Yearly_v1",
+        "pca_0_PCA_Quarterly_v1",
+        "pca_1_PCA_Quarterly_v1",
+        "pca_2_PCA_Quarterly_v1",
+        "pca_3_PCA_Quarterly_v1"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.38557449959728796,
+            "mae": 32449.97820898908,
+            "rmse": 69487.0259191195
+        },
+        "RandomForest": {
+            "r2": 0.2925827136274176,
+            "mae": 32372.771943734017,
+            "rmse": 74560.17902313112
+        },
+        "XGBoost": {
+            "r2": 0.2963916332611348,
+            "mae": 35071.957288503036,
+            "rmse": 74359.18235399056
+        },
+        "CatBoost": {
+            "r2": 0.30988224663722874,
+            "mae": 31637.78688313432,
+            "rmse": 73642.87044218669
+        },
+        "TabNet": {
+            "r2": -0.88612117025733,
+            "mae": 83651.58839859438,
+            "rmse": 121745.77622083749
+        },
+        "SimpleNN": {
+            "r2": 0.2713834784184912,
+            "mae": 31727.42301390665,
+            "rmse": 75669.1081815294
+        },
+        "EnhancedNN": {
+            "r2": 0.30646388316477347,
+            "mae": 29749.50201931146,
+            "rmse": 73825.03293032937
+        },
+        "Transformer": {
+            "r2": 0.32809364356103543,
+            "mae": 30414.693264466114,
+            "rmse": 72664.69967722104
+        }
+    },
+    "best_final_model": {
+        "name": "LightGBM",
+        "metrics": {
+            "r2": 0.38557449959728796,
+            "mae": 32449.97820898908,
+            "rmse": 69487.0259191195
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 365,
+                    "id": "LE_Yearly_v1"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Yearly_v1",
+                    "n_components": 4,
+                    "id": "PCA_Yearly_v1"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_Yearly_v1"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.36535402292711083,
+                "r2_score": 0.36535402292711083,
+                "num_features": 9
+            },
+            "adopted": true,
+            "reward": 0.05209845656966783
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_v1"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_v1",
+                    "n_components": 4,
+                    "id": "PCA_BiYearly_v1"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_BiYearly_v1"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.29026259511044383,
+                "r2_score": 0.29026259511044383,
+                "num_features": 13
+            },
+            "adopted": false,
+            "reward": -0.075091427816667
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_v1"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly_v1",
+                    "n_components": 4,
+                    "id": "PCA_Quarterly_v1"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_Quarterly_v1"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37695880711579965,
+                "r2_score": 0.37695880711579965,
+                "num_features": 13
+            },
+            "adopted": true,
+            "reward": 0.011604784188688821
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_v2"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_v2",
+                    "n_components": 4,
+                    "id": "PCA_BiYearly_v2"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_BiYearly_v2"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.28260025273409906,
+                "r2_score": 0.28260025273409906,
+                "num_features": 17
+            },
+            "adopted": false,
+            "reward": -0.0943585543817006
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_v2"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly_v2",
+                    "n_components": 4,
+                    "id": "PCA_Quarterly_v2"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_Quarterly_v2"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37695880711579965,
+                "r2_score": 0.37695880711579965,
+                "num_features": 17
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_v2"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_v2",
+                    "n_components": 4,
+                    "id": "PCA_BiYearly_v2"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_BiYearly_v2"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.28260025273409906,
+                "r2_score": 0.28260025273409906,
+                "num_features": 21
+            },
+            "adopted": false,
+            "reward": -0.0943585543817006
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_v2"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly_v2",
+                    "n_components": 4,
+                    "id": "PCA_Quarterly_v2"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_Quarterly_v2"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37695880711579965,
+                "r2_score": 0.37695880711579965,
+                "num_features": 17
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 730,
+                    "id": "LE_BiYearly_v1"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_BiYearly_v1",
+                    "n_components": 4,
+                    "id": "PCA_BiYearly_v1"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_BiYearly_v1"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.28260025273409906,
+                "r2_score": 0.28260025273409906,
+                "num_features": 21
+            },
+            "adopted": false,
+            "reward": -0.0943585543817006
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_v3"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly_v3",
+                    "n_components": 4,
+                    "id": "PCA_Quarterly_v3"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_Quarterly_v3"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37695880711579965,
+                "r2_score": 0.37695880711579965,
+                "num_features": 21
+            },
+            "adopted": true,
+            "reward": 0.0
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_learned_embedding",
+                    "window": 90,
+                    "id": "LE_Quarterly_v4"
+                },
+                {
+                    "operation": "create_pca_embedding",
+                    "source_id": "LE_Quarterly_v4",
+                    "n_components": 4,
+                    "id": "PCA_Quarterly_v4"
+                },
+                {
+                    "operation": "delete_feature",
+                    "source_id": "LE_Quarterly_v4"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.37695880711579965,
+                "r2_score": 0.37695880711579965,
+                "num_features": 25
+            },
+            "adopted": true,
+            "reward": 0.0
+        }
+    ]
+}
