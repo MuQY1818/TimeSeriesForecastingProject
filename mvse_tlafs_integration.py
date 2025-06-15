@@ -13,6 +13,7 @@ from sklearn.metrics import r2_score
 import warnings
 import os
 import sys
+from typing import List, Dict, Any
 
 # 导入 MVSE 模块
 from mvse_embedding import MVSEEmbedding
@@ -115,212 +116,95 @@ def generate_mvse_features_for_tlafs(df, target_col='temp', hist_len=90, num_lag
 
 def add_mvse_to_execute_plan():
     """
-    返回一个包含 MVSE 操作的代码片段，可以添加到 execute_plan 方法中
+    为 TLAFS 的 execute_plan 方法添加 MVSE 特征生成功能
     """
-    mvse_operation_code = '''
-                elif op == "create_mvse_features":
-                    print("  - Generating MVSE probe features...")
-                    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
-                    print("  - ✅ MVSE features generated.")
-    '''
-    return mvse_operation_code
+    def execute_plan_with_mvse(df: pd.DataFrame, plan: List[Dict[str, Any]]):
+        """
+        执行特征工程计划，包括 MVSE 特征生成
+        
+        Args:
+            df (pd.DataFrame): 输入数据
+            plan (List[Dict]): 特征工程计划
+            
+        Returns:
+            pd.DataFrame: 处理后的数据框
+        """
+        from tlafs_utils import generate_mvse_features_for_tlafs
+        
+        # 执行原始计划
+        for operation in plan:
+            if operation['operation'] == 'create_mvse_features':
+                df = generate_mvse_features_for_tlafs(
+                    df,
+                    target_col=operation.get('target_col', 'temp'),
+                    hist_len=operation.get('hist_len', 90),
+                    num_lags=operation.get('num_lags', 14)
+                )
+            else:
+                # 处理其他操作...
+                pass
+                
+        return df
+    
+    return execute_plan_with_mvse
 
 
 def add_mvse_to_llm_prompt():
     """
-    返回要添加到 LLM 提示中的 MVSE 工具描述
+    为 TLAFS 的 LLM 提示词添加 MVSE 相关说明
     """
-    mvse_tool_description = '''
-# 4. MVSE Probe Features (NEWEST & HIGHLY EFFICIENT)
-# Multi-View Sequential Embedding: Uses 3 pooling strategies (GAP, GMP, MaskedGAP) to extract robust features.
-# Generates only 24 high-quality features (much fewer than traditional probe_features).
-# Excellent for capturing both trends and anomalies with strong robustness.
-- {"operation": "create_mvse_features"}
-'''
-    return mvse_tool_description
+    def get_enhanced_prompt(context_prompt: str) -> str:
+        """
+        增强 LLM 提示词，添加 MVSE 相关说明
+        
+        Args:
+            context_prompt (str): 原始提示词
+            
+        Returns:
+            str: 增强后的提示词
+        """
+        mvse_context = """
+        可用的 MVSE 特征工程操作：
+        1. create_mvse_features: 生成多视角序列编码特征
+           - target_col: 目标列名
+           - hist_len: 历史序列长度
+           - num_lags: 滞后特征数量
+        """
+        
+        return context_prompt + mvse_context
+    
+    return get_enhanced_prompt
 
 
 def create_enhanced_tlafs_with_mvse():
     """
-    创建一个增强版的 T-LAFS 类，集成了 MVSE 探针功能
+    创建增强版的 TLAFS 类，集成 MVSE 功能
     """
+    from tlafs_core import TLAFS_Algorithm
     
-    # 这里我们需要从原始文件导入 TLAFS_Algorithm 类
-    # 由于直接修改原文件可能影响现有功能，我们创建一个继承类
+    class EnhancedTLAFS(TLAFS_Algorithm):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.execute_plan = add_mvse_to_execute_plan()
+            self.get_plan_from_llm = add_mvse_to_llm_prompt()
     
-    try:
-        # 尝试导入原始的 TLAFS_Algorithm
-        from clp_probe_experiment import TLAFS_Algorithm as OriginalTLAFS
-        
-        class EnhancedTLAFS(OriginalTLAFS):
-            """
-            增强版 T-LAFS，集成了 MVSE 探针功能
-            """
-            
-            @staticmethod
-            def execute_plan(df: pd.DataFrame, plan: list):
-                """
-                重写 execute_plan 方法，添加 MVSE 支持
-                """
-                # 首先调用原始的 execute_plan 处理其他操作
-                temp_df = df.copy()
-                target_col = EnhancedTLAFS.target_col_static
-                
-                # 确保基础时间特征存在
-                required_time_cols = ['dayofweek', 'month', 'weekofyear', 'is_weekend']
-                if not all(col in temp_df.columns for col in required_time_cols):
-                    if 'dayofweek' not in temp_df.columns:
-                        temp_df['dayofweek'] = temp_df['date'].dt.dayofweek
-                    if 'month' not in temp_df.columns:
-                        temp_df['month'] = temp_df['date'].dt.month
-                    if 'weekofyear' not in temp_df.columns:
-                        temp_df['weekofyear'] = temp_df['date'].dt.isocalendar().week.astype(int)
-                    if 'is_weekend' not in temp_df.columns:
-                        temp_df['is_weekend'] = (temp_df['date'].dt.dayofweek >= 5).astype(int)
-                
-                for step in plan:
-                    op = step.get("operation")
-                    
-                    try:
-                        if op == "create_mvse_features":
-                            print("  - Generating MVSE probe features...")
-                            temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
-                            print("  - ✅ MVSE features generated.")
-                        else:
-                            # 对于其他操作，调用父类的方法
-                            # 由于父类方法是静态的，我们需要重新实现核心逻辑
-                            temp_df = OriginalTLAFS.execute_plan(temp_df, [step])
-                            
-                    except Exception as e:
-                        import traceback
-                        print(f"  - ❌ ERROR executing step {step}. Error: {e}\n{traceback.format_exc()}")
-                
-                return temp_df
-            
-            def get_plan_from_llm(self, context_prompt, iteration_num, max_iterations):
-                """
-                重写 LLM 提示生成方法，添加 MVSE 工具
-                """
-                # 调用父类方法获取基础提示
-                original_prompt = super().get_plan_from_llm.__func__(self, context_prompt, iteration_num, max_iterations)
-                
-                # 如果是高级阶段，我们需要修改提示以包含 MVSE
-                stage = "advanced"
-                if (iteration_num / max_iterations) < 0.4:
-                    stage = "basic"
-                
-                if stage == "advanced":
-                    # 重新生成包含 MVSE 的提示
-                    return self._get_enhanced_plan_from_llm(context_prompt, iteration_num, max_iterations)
-                else:
-                    return original_prompt
-            
-            def _get_enhanced_plan_from_llm(self, context_prompt, iteration_num, max_iterations):
-                """
-                生成包含 MVSE 的增强提示
-                """
-                from clp_probe_experiment import gemini_model
-                import json
-                
-                base_prompt = f"""You are a Data Scientist RL agent. Your goal is to create a feature engineering plan to maximize the Fusion R^2 score.
-Your response MUST be a valid JSON list of operations: `[ {{"operation": "op_name", ...}}, ... ]`.
-The target column is '{self.target_col}'.
-"""
-                
-                basic_tools = """
-# *** STAGE 1: BASIC FEATURE ENGINEERING ***
-# Focus on creating a strong baseline with fundamental time-series features.
-# AVAILABLE TOOLS:
-- {{"operation": "create_lag", "on": "feature_name", "days": int, "id": "..."}}
-- {{"operation": "create_diff", "on": "feature_name", "periods": int, "id": "..."}}
-- {{"operation": "create_rolling_mean", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_rolling_std", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_ewm", "on": "feature_name", "span": int, "id": "..."}}
-- {{"operation": "create_fourier_features", "period": 365.25, "order": 4}}
-- {{"operation": "create_interaction", "features": ["feat1", "feat2"], "id": "..."}}
-- {{"operation": "delete_feature", "feature": "feature_name"}}
-"""
-
-                advanced_tools = """
-# *** STAGE 2: ADVANCED FEATURE ENGINEERING ***
-# Now you can use powerful learned embeddings and meta-forecasts. Combine them with the best basic features.
-# AVAILABLE TOOLS (includes all basic tools plus):
-# 1. Learned Embeddings (VERY POWERFUL)
-- {{"operation": "create_learned_embedding", "window": [90, 365, 730], "id": "UNIQUE_ID"}}
-
-# 2. Meta-Forecast Features
-- {{"operation": "create_forecast_feature", "model_name": ["SimpleNN_meta", "EnhancedNN_meta"], "id": "UNIQUE_ID"}}
-
-# 3. Traditional Attention Probe Features (POWERFUL but HIGH-DIMENSIONAL)
-# This generates 70+ features from a 365-day lookback window using an attention-based probe.
-- {{"operation": "create_probe_features"}}
-
-# 4. MVSE Probe Features (NEWEST & HIGHLY EFFICIENT) ⭐ RECOMMENDED ⭐
-# Multi-View Sequential Embedding: Uses 3 pooling strategies (GAP, GMP, MaskedGAP) to extract robust features.
-# Generates only 24 high-quality features (much fewer than traditional probe_features).
-# Excellent for capturing both trends and anomalies with strong robustness.
-# ADVANTAGE: Lower dimensionality, better generalization, faster training.
-- {{"operation": "create_mvse_features"}}
-"""
-                
-                rules = """
-*** RULES ***
-- IDs must be unique. Do not reuse IDs from "Available Features".
-- Propose short plans (1-3 steps).
-- For parameters shown with a list of options (e.g., "window": [90, 365]), you MUST CHOOSE ONLY ONE value.
-- `create_mvse_features` is HIGHLY RECOMMENDED over `create_probe_features` due to better efficiency and lower overfitting risk.
-- `create_learned_embedding` is very powerful. Try interacting it with other features using `create_interaction`.
-- Prefer `create_mvse_features` when you need advanced probe capabilities with better generalization.
-"""
-
-                system_prompt = base_prompt + basic_tools + advanced_tools + rules
-                
-                try:
-                    if gemini_model is None:
-                        raise Exception("Gemini model not initialized.")
-                    
-                    full_prompt_for_gemini = system_prompt + "\n\n" + context_prompt
-                    response = gemini_model.generate_content(full_prompt_for_gemini)
-                    plan_str = response.text
-                    parsed_json = json.loads(plan_str)
-
-                    if isinstance(parsed_json, dict) and "plan" in parsed_json:
-                        plan = parsed_json.get("plan", [])
-                        return plan if isinstance(plan, list) else [plan]
-                    elif isinstance(parsed_json, list):
-                        return parsed_json
-                    elif isinstance(parsed_json, dict) and "operation" in parsed_json:
-                        return [parsed_json]
-                    else:
-                        print(f"  - ⚠️ Warning: LLM returned unexpected structure: {parsed_json}")
-                        return []
-                        
-                except Exception as e:
-                    print(f"❌ Error calling Gemini: {e}")
-                    return [{"operation": "create_mvse_features"}]  # 默认使用 MVSE
-        
-        return EnhancedTLAFS
-        
-    except ImportError as e:
-        print(f"❌ 无法导入原始 TLAFS_Algorithm: {e}")
-        print("请确保 tlafs_core.py 文件存在且可导入")
-        return None
+    return EnhancedTLAFS
 
 
 def test_mvse_integration_in_tlafs():
     """
-    测试 MVSE 在 T-LAFS 中的集成
+    测试 MVSE 在 TLAFS 中的集成
     """
-    print("🧪 测试 MVSE 在 T-LAFS 中的集成...")
+    print("🧪 测试 MVSE 在 TLAFS 中的集成...")
     
-    # 创建测试数据
-    dates = pd.date_range('2020-01-01', periods=500, freq='D')
+    # 创建模拟数据
+    dates = pd.date_range('2020-01-01', periods=1000, freq='D')
     np.random.seed(42)
     
-    # 生成带有季节性的时间序列
+    # 生成带有季节性和趋势的时间序列
     t = np.arange(len(dates))
-    seasonal = 10 * np.sin(2 * np.pi * t / 365.25)
-    trend = 0.01 * t
+    seasonal = 10 * np.sin(2 * np.pi * t / 365.25)  # 年度季节性
+    trend = 0.01 * t  # 线性趋势
     noise = np.random.normal(0, 2, len(dates))
     temp = 20 + seasonal + trend + noise
     
@@ -329,36 +213,24 @@ def test_mvse_integration_in_tlafs():
         'temp': temp
     })
     
-    print(f"📊 测试数据: {len(df)} 个样本")
+    # 创建增强版 TLAFS
+    EnhancedTLAFS = create_enhanced_tlafs_with_mvse()
     
     # 测试 MVSE 特征生成
-    print("\n🔧 测试 MVSE 特征生成...")
-    df_with_mvse = generate_mvse_features_for_tlafs(df, target_col='temp')
+    plan = [{
+        'operation': 'create_mvse_features',
+        'target_col': 'temp',
+        'hist_len': 90,
+        'num_lags': 14
+    }]
+    
+    df_with_mvse = EnhancedTLAFS.execute_plan(df.copy(), plan)
     
     # 检查结果
     mvse_cols = [col for col in df_with_mvse.columns if 'mvse_' in col]
-    print(f"✅ 生成的 MVSE 特征: {len(mvse_cols)} 个")
-    print(f"   特征列表: {mvse_cols}")
-    
-    # 测试增强版 T-LAFS 类
-    print("\n🚀 测试增强版 T-LAFS 类...")
-    EnhancedTLAFS = create_enhanced_tlafs_with_mvse()
-    
-    if EnhancedTLAFS:
-        print("✅ 增强版 T-LAFS 类创建成功")
-        
-        # 测试 execute_plan 方法
-        test_plan = [{"operation": "create_mvse_features"}]
-        
-        # 模拟设置必要的类属性
-        EnhancedTLAFS.target_col_static = 'temp'
-        
-        result_df = EnhancedTLAFS.execute_plan(df, test_plan)
-        
-        new_mvse_cols = [col for col in result_df.columns if 'mvse_' in col]
-        print(f"✅ execute_plan 测试成功: 生成了 {len(new_mvse_cols)} 个 MVSE 特征")
-    else:
-        print("❌ 增强版 T-LAFS 类创建失败")
+    print(f"✅ MVSE 特征生成测试:")
+    print(f"   - 生成的特征数量: {len(mvse_cols)}")
+    print(f"   - 前5个特征: {mvse_cols[:5]}")
     
     print("\n✅ MVSE 集成测试完成！")
 

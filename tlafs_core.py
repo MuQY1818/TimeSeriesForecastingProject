@@ -26,7 +26,7 @@ from catboost import CatBoostRegressor
 import re
 from collections import defaultdict
 from probe_forecaster_utils import train_probe_forecaster, generate_probe_features, ProbeForecaster, PositionalEncoding, AgentAttentionProbe
-from mvse_tlafs_integration import generate_mvse_features_for_tlafs
+from tlafs_utils import generate_mvse_features_for_tlafs
 
 warnings.filterwarnings('ignore')
 
