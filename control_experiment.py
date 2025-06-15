@@ -226,7 +226,7 @@ def save_results_to_json(results_data):
 
 def main():
     """Main function to run the Control Group experiment."""
-    DATASET_TYPE = 'total_cleaned'
+    DATASET_TYPE = 'min_daily_temps'
     TARGET_COL = 'temp'
     
     print("="*80)

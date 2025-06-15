@@ -1,0 +1,337 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_Fusion_Probe",
+    "best_score_during_search": 0.7215294694047123,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "on": "temp",
+            "window": 7,
+            "id": "temp_rolling_mean_7"
+        },
+        {
+            "operation": "create_rolling_std",
+            "on": "temp",
+            "window": 7,
+            "id": "temp_rolling_std_7"
+        },
+        {
+            "operation": "create_rolling_mean",
+            "on": "temp",
+            "window": 28,
+            "id": "temp_rolling_mean_28"
+        },
+        {
+            "operation": "create_rolling_std",
+            "on": "temp",
+            "window": 28,
+            "id": "temp_rolling_std_28"
+        },
+        {
+            "operation": "create_ewm",
+            "on": "temp",
+            "span": 14,
+            "id": "temp_ewm_14"
+        },
+        {
+            "operation": "create_rolling_min",
+            "on": "temp",
+            "window": 14,
+            "id": "temp_rolling_min_14"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "temp_rolling_mean_7",
+        "temp_rolling_std_7",
+        "temp_rolling_mean_28",
+        "temp_rolling_std_28",
+        "temp_ewm_14",
+        "temp_rolling_min_14"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.7033953583385748,
+            "mae": 1.7733443333048373,
+            "rmse": 2.234986582176899
+        },
+        "RandomForest": {
+            "r2": 0.7139245191390151,
+            "mae": 1.7144602739726027,
+            "rmse": 2.194958264651436
+        },
+        "XGBoost": {
+            "r2": 0.6594093815569438,
+            "mae": 1.878164844994676,
+            "rmse": 2.3949821954720836
+        },
+        "CatBoost": {
+            "r2": 0.707009635143581,
+            "mae": 1.754238007570214,
+            "rmse": 2.221327626269982
+        },
+        "TabNet": {
+            "r2": -6.231514144070109,
+            "mae": 8.429785499834034,
+            "rmse": 11.035717347631712
+        },
+        "SimpleNN": {
+            "r2": 0.7115194713144798,
+            "mae": 1.7290728556619932,
+            "rmse": 2.2041655039982544
+        },
+        "EnhancedNN": {
+            "r2": 0.712385169493556,
+            "mae": 1.7235401429215524,
+            "rmse": 2.200855790592781
+        },
+        "Transformer": {
+            "r2": 0.7230899118492482,
+            "mae": 1.7044973195089053,
+            "rmse": 2.159510587073978
+        }
+    },
+    "best_final_model": {
+        "name": "Transformer",
+        "metrics": {
+            "r2": 0.7230899118492482,
+            "mae": 1.7044973195089053,
+            "rmse": 2.159510587073978
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_rolling_mean",
+                    "on": "temp",
+                    "window": 7,
+                    "id": "temp_rolling_mean_7"
+                },
+                {
+                    "operation": "create_rolling_std",
+                    "on": "temp",
+                    "window": 7,
+                    "id": "temp_rolling_std_7"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7183491881232041,
+                "r2_lgbm": 0.7193554072461448,
+                "r2_nn": 0.7173429690002635,
+                "num_features": 7
+            },
+            "adopted": true,
+            "reward": 0.023993964845232196
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_rolling_mean",
+                    "on": "temp",
+                    "window": 28,
+                    "id": "temp_rolling_mean_28"
+                },
+                {
+                    "operation": "create_rolling_std",
+                    "on": "temp",
+                    "window": 28,
+                    "id": "temp_rolling_std_28"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7187110033936609,
+                "r2_lgbm": 0.7136642017880105,
+                "r2_nn": 0.7237578049993113,
+                "num_features": 9
+            },
+            "adopted": true,
+            "reward": 0.00036181527045675566
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_ewm",
+                    "on": "temp",
+                    "span": 14,
+                    "id": "temp_ewm_14"
+                },
+                {
+                    "operation": "create_rolling_min",
+                    "on": "temp",
+                    "window": 14,
+                    "id": "temp_rolling_min_14"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7215294694047123,
+                "r2_lgbm": 0.7204881412155673,
+                "r2_nn": 0.7225707975938573,
+                "num_features": 11
+            },
+            "adopted": true,
+            "reward": 0.0028184660110514015
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_rolling_max",
+                    "on": "temp",
+                    "window": 7,
+                    "id": "temp_rolling_max_7"
+                },
+                {
+                    "operation": "create_rolling_skew",
+                    "on": "temp",
+                    "window": 14,
+                    "id": "temp_rolling_skew_14"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7170811742467033,
+                "r2_lgbm": 0.721900827581363,
+                "r2_nn": 0.7122615209120435,
+                "num_features": 13
+            },
+            "adopted": true,
+            "reward": -0.004448295158009041
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_mvse_features"
+                },
+                {
+                    "operation": "create_forecast_feature",
+                    "model_name": "EnhancedNN_meta",
+                    "id": "forecast_temp_enhanced_meta"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7168092747587137,
+                "r2_lgbm": 0.712621604166062,
+                "r2_nn": 0.7209969453513654,
+                "num_features": 38
+            },
+            "adopted": true,
+            "reward": -0.00027189948798955754
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_mvse_features"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7061071806309169,
+                "r2_lgbm": 0.712621604166062,
+                "r2_nn": 0.6995927570957717,
+                "num_features": 38
+            },
+            "adopted": false,
+            "reward": -0.010702094127796768
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_mvse_features"
+                },
+                {
+                    "operation": "create_forecast_feature",
+                    "model_name": "SimpleNN_meta",
+                    "id": "simple_nn_meta_forecast_0"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7150254016892776,
+                "r2_lgbm": 0.7138807591703271,
+                "r2_nn": 0.7161700442082283,
+                "num_features": 39
+            },
+            "adopted": false,
+            "reward": -0.0017838730694360594
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_mvse_features"
+                },
+                {
+                    "operation": "create_forecast_feature",
+                    "model_name": "EnhancedNN_meta",
+                    "id": "forecast_temp_enhanced_meta_v2"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7153081717793549,
+                "r2_lgbm": 0.712621604166062,
+                "r2_nn": 0.7179947393926478,
+                "num_features": 39
+            },
+            "adopted": false,
+            "reward": -0.0015011029793587927
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_mvse_features"
+                },
+                {
+                    "operation": "create_learned_embedding",
+                    "on": "temp",
+                    "window": 365,
+                    "id": "temp_learned_embedding_365"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.6974538533773426,
+                "r2_lgbm": 0.7059837159161149,
+                "r2_nn": 0.6889239908385703,
+                "num_features": 102
+            },
+            "adopted": false,
+            "reward": -0.01935542138137114
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_mvse_features"
+                },
+                {
+                    "operation": "create_fourier_features",
+                    "period": 365.25,
+                    "order": 4
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.7088584146950778,
+                "r2_lgbm": 0.7093696892678667,
+                "r2_nn": 0.708347140122289,
+                "num_features": 46
+            },
+            "adopted": false,
+            "reward": -0.007950860063635878
+        }
+    ]
+}

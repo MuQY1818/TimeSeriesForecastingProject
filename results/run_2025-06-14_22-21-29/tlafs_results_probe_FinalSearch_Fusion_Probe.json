@@ -1,0 +1,312 @@
+{
+    "run_mode": "search",
+    "source_plan_file": "N/A",
+    "probe_model": "FinalSearch_Fusion_Probe",
+    "best_score_during_search": 0.345211499364692,
+    "best_feature_plan": [
+        {
+            "operation": "create_lag",
+            "feature": "temp",
+            "days": 1,
+            "id": "lag1"
+        },
+        {
+            "operation": "create_fourier_features",
+            "period": 365.25,
+            "order": 4
+        },
+        {
+            "operation": "create_rolling_mean",
+            "on": "temp",
+            "window": 7,
+            "id": "temp_rolling_mean_7d"
+        }
+    ],
+    "final_features": [
+        "dayofweek",
+        "month",
+        "weekofyear",
+        "is_weekend",
+        "temp_lag1",
+        "fourier_sin_1_365",
+        "fourier_cos_1_365",
+        "fourier_sin_2_365",
+        "fourier_cos_2_365",
+        "fourier_sin_3_365",
+        "fourier_cos_3_365",
+        "fourier_sin_4_365",
+        "fourier_cos_4_365",
+        "temp_rolling_mean_7d"
+    ],
+    "final_validation_scores": {
+        "LightGBM": {
+            "r2": 0.4000948454685219,
+            "mae": 32047.71220198808,
+            "rmse": 68661.04435367098
+        },
+        "RandomForest": {
+            "r2": 0.3354943093725874,
+            "mae": 31852.0562404092,
+            "rmse": 72263.41148814767
+        },
+        "XGBoost": {
+            "r2": 0.1640016487777649,
+            "mae": 36611.36511698769,
+            "rmse": 81053.50850376012
+        },
+        "CatBoost": {
+            "r2": 0.4043807698737909,
+            "mae": 30060.701490753047,
+            "rmse": 68415.33590191732
+        },
+        "TabNet": {
+            "r2": -0.886145889533424,
+            "mae": 83585.0822578879,
+            "rmse": 121746.57401093782
+        },
+        "SimpleNN": {
+            "r2": 0.2631239784972106,
+            "mae": 33210.385380035164,
+            "rmse": 76096.78703938046
+        },
+        "EnhancedNN": {
+            "r2": 0.33101099703813963,
+            "mae": 30610.53050071931,
+            "rmse": 72506.77646236694
+        },
+        "Transformer": {
+            "r2": 0.2793634514530232,
+            "mae": 32458.69067695013,
+            "rmse": 75253.59475140575
+        }
+    },
+    "best_final_model": {
+        "name": "CatBoost",
+        "metrics": {
+            "r2": 0.4043807698737909,
+            "mae": 30060.701490753047,
+            "rmse": 68415.33590191732
+        }
+    },
+    "run_history": [
+        {
+            "iteration": 1,
+            "plan": [
+                {
+                    "operation": "create_fourier_features",
+                    "period": 365.25,
+                    "order": 4
+                },
+                {
+                    "operation": "create_rolling_mean",
+                    "on": "temp",
+                    "window": 7,
+                    "id": "temp_rolling_mean_7d"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.345211499364692,
+                "r2_lgbm": 0.39473511658971727,
+                "r2_nn": 0.2956878821396667,
+                "num_features": 14
+            },
+            "adopted": true,
+            "reward": 0.04956000035011243
+        },
+        {
+            "iteration": 2,
+            "plan": [
+                {
+                    "operation": "create_rolling_mean",
+                    "on": "temp",
+                    "window": 90,
+                    "id": "temp_rolling_mean_90d"
+                },
+                {
+                    "operation": "create_lag",
+                    "on": "temp",
+                    "days": 7,
+                    "id": "temp_lag7"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3133141285282423,
+                "r2_lgbm": 0.3782321028366652,
+                "r2_nn": 0.24839615421981942,
+                "num_features": 16
+            },
+            "adopted": false,
+            "reward": -0.03189737083644967
+        },
+        {
+            "iteration": 3,
+            "plan": [
+                {
+                    "operation": "create_diff",
+                    "on": "temp",
+                    "periods": 1,
+                    "id": "temp_diff_1d"
+                },
+                {
+                    "operation": "create_rolling_std",
+                    "on": "temp",
+                    "window": 7,
+                    "id": "temp_rolling_std_7d"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.2560864404575838,
+                "r2_lgbm": 0.2913271049866195,
+                "r2_nn": 0.22084577592854804,
+                "num_features": 16
+            },
+            "adopted": false,
+            "reward": -0.0891250589071082
+        },
+        {
+            "iteration": 4,
+            "plan": [
+                {
+                    "operation": "create_ewm",
+                    "on": "temp",
+                    "span": 30,
+                    "id": "temp_ewm_30d"
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.3431990692582321,
+                "r2_lgbm": 0.3925312312391366,
+                "r2_nn": 0.29386690727732767,
+                "num_features": 15
+            },
+            "adopted": true,
+            "reward": -0.0020124301064598504
+        },
+        {
+            "iteration": 5,
+            "plan": [
+                {
+                    "operation": "create_multi_scale_mvse_features",
+                    "scales": [
+                        90,
+                        365,
+                        730
+                    ]
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.03418003490443361,
+                "r2_lgbm": 0.06836006980886722,
+                "r2_nn": -0.11178168330009886,
+                "num_features": 30
+            },
+            "adopted": false,
+            "reward": -0.3090190343537985
+        },
+        {
+            "iteration": 6,
+            "plan": [
+                {
+                    "operation": "create_multi_scale_mvse_features",
+                    "scales": [
+                        90,
+                        365,
+                        730
+                    ]
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.0,
+                "r2_lgbm": -0.04881573139852735,
+                "r2_nn": -0.09642272244747874,
+                "num_features": 30
+            },
+            "adopted": false,
+            "reward": -0.3431990692582321
+        },
+        {
+            "iteration": 7,
+            "plan": [
+                {
+                    "operation": "create_multi_scale_mvse_features",
+                    "scales": [
+                        90,
+                        365,
+                        730
+                    ]
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.0,
+                "r2_lgbm": -0.008490019789864967,
+                "r2_nn": -0.05624072926936052,
+                "num_features": 30
+            },
+            "adopted": false,
+            "reward": -0.3431990692582321
+        },
+        {
+            "iteration": 8,
+            "plan": [
+                {
+                    "operation": "create_multi_scale_mvse_features",
+                    "scales": [
+                        90,
+                        365,
+                        730
+                    ]
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.051536978129437805,
+                "r2_lgbm": -0.1242997543687192,
+                "r2_nn": 0.10307395625887561,
+                "num_features": 30
+            },
+            "adopted": false,
+            "reward": -0.2916620911287943
+        },
+        {
+            "iteration": 9,
+            "plan": [
+                {
+                    "operation": "create_multi_scale_mvse_features",
+                    "scales": [
+                        90,
+                        365,
+                        730
+                    ]
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.062371779551525564,
+                "r2_lgbm": -0.03309550660910232,
+                "r2_nn": 0.12474355910305113,
+                "num_features": 30
+            },
+            "adopted": false,
+            "reward": -0.28082728970670656
+        },
+        {
+            "iteration": 10,
+            "plan": [
+                {
+                    "operation": "create_multi_scale_mvse_features",
+                    "scales": [
+                        90,
+                        365,
+                        730
+                    ]
+                }
+            ],
+            "probe_results": {
+                "primary_score": 0.0,
+                "r2_lgbm": -0.09636771443445502,
+                "r2_nn": -0.08896363989923084,
+                "num_features": 30
+            },
+            "adopted": false,
+            "reward": -0.3431990692582321
+        }
+    ]
+}

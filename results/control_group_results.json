@@ -1,0 +1,49 @@
+{
+    "experiment_type": "Control Group (Static Features)",
+    "features_used": [
+        "temp_lag_1",
+        "temp_lag_2",
+        "temp_lag_3",
+        "temp_lag_7",
+        "temp_lag_14",
+        "temp_lag_28",
+        "temp_diff_1",
+        "temp_roll_mean_7",
+        "temp_roll_std_7",
+        "temp_roll_min_7",
+        "temp_roll_max_7",
+        "temp_roll_mean_14",
+        "temp_roll_std_14",
+        "temp_roll_min_14",
+        "temp_roll_max_14",
+        "temp_roll_mean_28",
+        "temp_roll_std_28",
+        "temp_roll_min_28",
+        "temp_roll_max_28",
+        "temp_ewm_7",
+        "date_dayofweek",
+        "date_month",
+        "date_quarter",
+        "date_is_weekend",
+        "date_dayofyear",
+        "date_weekofyear",
+        "fourier_sin_1_365",
+        "fourier_cos_1_365",
+        "fourier_sin_2_365",
+        "fourier_cos_2_365",
+        "fourier_sin_1_182",
+        "fourier_cos_1_182"
+    ],
+    "final_validation_scores": {
+        "LightGBM": 0.7002117020704373,
+        "RandomForest": 0.7241761803243179,
+        "XGBoost": 0.6448641384753768,
+        "SimpleNN": 0.7209261859787646,
+        "EnhancedNN": 0.7204367239417708,
+        "Transformer": 0.7057121046957127
+    },
+    "best_final_model": {
+        "name": "RandomForest",
+        "score": 0.7241761803243179
+    }
+}

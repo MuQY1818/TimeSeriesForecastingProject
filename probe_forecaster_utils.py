@@ -65,15 +65,33 @@ class ProbeForecaster(nn.Module):
         combined_features = torch.cat([probe_output_flat, x_lags, x_exog], dim=1)
         return self.forecasting_head(combined_features)
 
-def get_data(file_path='data/total_cleaned.csv'):
+def get_data(file_path='data/min_daily_temps.csv'):
+    """
+    加载并预处理数据
+    智能处理 'min_daily_temps.csv' 和 'total_cleaned.csv'
+    """
     df = pd.read_csv(file_path)
-    if '日期' in df.columns:
+    
+    # 根据文件名或列名判断数据集类型
+    if 'min_daily_temps.csv' in file_path or 'Date' in df.columns:
+        df.rename(columns={'Date': 'date', 'Temp': 'temp'}, inplace=True)
+    elif 'total_cleaned.csv' in file_path or '日期' in df.columns:
         df.rename(columns={'日期': 'date', '成交商品件数': 'temp'}, inplace=True)
+    
+    if 'date' not in df.columns:
+        raise KeyError(f"未能找到'date'列，请检查CSV文件 {file_path} 或列名映射")
+    
     df['date'] = pd.to_datetime(df['date'])
     df.sort_values('date', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    
     df['dayofweek'] = df['date'].dt.dayofweek
     df['month'] = df['date'].dt.month
-    return df.reset_index(drop=True)
+    
+    if 'temp' not in df.columns:
+        raise KeyError(f"未能找到'temp'列，请检查CSV文件 {file_path} 或列名映射")
+        
+    return df
 
 def create_sequences_and_lags(data, hist_len, num_lags):
     X_hist, y_target, X_lags, X_exog = [], [], [], []

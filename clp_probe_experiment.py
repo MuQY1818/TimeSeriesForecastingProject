@@ -15,6 +15,9 @@ from sklearn.preprocessing import MinMaxScaler
 import joblib
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.svm import SVR
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.neighbors import KNeighborsRegressor
 from xgboost import XGBRegressor
 from datetime import datetime
 import random
@@ -23,6 +26,7 @@ from catboost import CatBoostRegressor
 import re
 from collections import defaultdict
 from probe_forecaster_utils import train_probe_forecaster, generate_probe_features, ProbeForecaster, PositionalEncoding, AgentAttentionProbe
+from mvse_tlafs_integration import generate_mvse_features_for_tlafs
 
 warnings.filterwarnings('ignore')
 
@@ -229,132 +233,6 @@ def visualize_autoencoder_reconstruction(model, data_loader, scaler, results_dir
 
 # --- Probe & Evaluation ---
 def probe_feature_set(df: pd.DataFrame, target_col: str):
-    df_feat = df.drop(columns=['date', target_col]).dropna()
-    y = df.loc[df_feat.index][target_col]
-    X = df_feat
-
-    if X.empty or y.empty or len(X) < 20:
-        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": 0}
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-
-    if len(X_train) < 1 or len(X_test) < 1:
-        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": X.shape[1]}
-
-    lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=50, verbosity=-1, n_jobs=1)
-    lgb_model.fit(X_train, y_train)
-    preds_lgbm = lgb_model.predict(X_test)
-    score_lgbm = r2_score(y_test, preds_lgbm)
-
-    scaler_x = MinMaxScaler()
-    X_train_s = scaler_x.fit_transform(X_train)
-    X_test_s = scaler_x.transform(X_test)
-    scaler_y = MinMaxScaler()
-    y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
-    nn_model = SimpleNN(X_train.shape[1])
-    preds_nn_scaled = train_pytorch_model(nn_model, X_train_s, y_train_s, X_test_s)
-# --- NEW: Self-Supervised Probe Model ---
-class DynamicProbeModel(nn.Module):
-    """
-    A GRU-based model for the self-supervised probe.
-    It learns to predict the next state of the feature set based on a window of past states.
-    """
-    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dim=1):
-        super().__init__()
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True
-        )
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, input_dim)
-        gru_out, _ = self.gru(x)
-        # We only care about the prediction for the NEXT step, so we take the last output
-        last_time_step_out = gru_out[:, -1, :]
-        prediction = self.fc(last_time_step_out)
-        return prediction
-
-# --- Feature Engineering & Evaluation (Adapted for DAP) ---
-def call_strategist_llm(context: str):
-    """
-    Calls the LLM to get a feature engineering plan.
-    This is where the 'thinking' happens.
-    """
-    if not gemini_model:
-        print("❌ LLM client not initialized. Cannot call strategist.")
-        # Return a simple plan as a fallback
-        return [{"operation": "create_rolling_mean", "feature": "temp", "window": 3, "id": "fallback"}]
-
-    try:
-        # Use the global gemini_model configured in setup_api_client
-        if gemini_model is None:
-            raise Exception("Gemini model not initialized. Please run setup_api_client().")
-        
-        # Combine prompts for Gemini
-        full_prompt_for_gemini = system_prompt + "\n\n" + context_prompt
-        
-        response = gemini_model.generate_content(full_prompt_for_gemini)
-        plan_str = response.text
-
-        parsed_json = json.loads(plan_str)
-
-        # --- NEW: Robust plan parsing to handle single-dict or list responses ---
-        # Case 1: The response is a dictionary with a "plan" key (legacy format)
-        if isinstance(parsed_json, dict) and "plan" in parsed_json:
-            plan = parsed_json.get("plan", [])
-            return plan if isinstance(plan, list) else [plan]
-
-        # Case 2: The response is already a list of operations (ideal format)
-        elif isinstance(parsed_json, list):
-            return parsed_json
-
-        # Case 3: The response is a single operation dictionary (common for 1-step plans)
-        elif isinstance(parsed_json, dict) and "operation" in parsed_json:
-            return [parsed_json] # Wrap it in a list to make it iterable
-
-        # Fallback for unexpected structure
-        print(f"  - ⚠️ Warning: LLM returned an unexpected plan structure: {parsed_json}")
-        return []
-    except Exception as e:
-        print(f"❌ Error calling Gemini or parsing plan: {e}")
-        # Fallback plan updated to not use the target variable directly for rolling stats
-        return [{"operation": "create_rolling_std", "feature": "month", "window": 3, "id": "fallback_err"}]
-
-def evaluate_performance(df: pd.DataFrame, target_col: str):
-    """
-    DEPRECATED: This function is replaced by the more advanced `probe_feature_set`.
-    Evaluates feature set performance using a fast and robust LightGBM model.
-    This function serves as the "judge" for each T-LAFS iteration.
-    """
-    # 1. Prepare Data
-    df_feat = df.drop(columns=['date', target_col]).dropna()
-    y = df.loc[df_feat.index][target_col]
-    X = df_feat
-
-    if X.empty:
-        print("  - ⚠️ Warning: Feature set is empty after dropping NaNs. Returning poor score.")
-        return -1.0, pd.Series(dtype=float), pd.Series(dtype=float)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
-
-    # 2. Model Training, Prediction & Importance
-    lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=100, verbosity=-1)
-    lgb_model.fit(X_train, y_train)
-    
-    predictions = lgb_model.predict(X_test)
-    score = r2_score(y_test, predictions)
-    
-    importances = pd.Series(lgb_model.feature_importances_, index=X.columns)
-    
-    # SHAP contributions are deprecated, return empty series for compatibility
-    shap_contributions = pd.Series(dtype=float)
-
-    return score, importances.sort_values(ascending=False), shap_contributions
-
-def probe_feature_set(df: pd.DataFrame, target_col: str):
     """
     NEW PROBE: Multi-Model Fusion Probe.
     Evaluates a feature set's general quality by testing it on two diverse models:
@@ -369,20 +247,22 @@ def probe_feature_set(df: pd.DataFrame, target_col: str):
 
     if X.empty or y.empty or len(X) < 20: # Added length check for robustness
         print("  - ⚠️ Warning: Feature set is empty or too small. Returning poor score.")
-        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": 0}
+        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": 0, "importances": None}
 
     # Use a simple time-series split (no shuffling)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
     if len(X_train) < 1 or len(X_test) < 1:
         print("  - ⚠️ Warning: Not enough data for train/test split. Returning poor score.")
-        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": X.shape[1]}
+        return {"primary_score": 0.0, "r2_lgbm": 0.0, "r2_nn": 0.0, "num_features": X.shape[1], "importances": None}
 
     # --- Model 1: LightGBM ---
     lgb_model = lgb.LGBMRegressor(random_state=42, n_estimators=50, verbosity=-1, n_jobs=1)
     lgb_model.fit(X_train, y_train)
     preds_lgbm = lgb_model.predict(X_test)
     score_lgbm = r2_score(y_test, preds_lgbm)
+    # --- NEW: Extract feature importances ---
+    importances = pd.Series(lgb_model.feature_importances_, index=X_train.columns)
 
     # --- Model 2: SimpleNN ---
     scaler_x = MinMaxScaler()
@@ -406,7 +286,8 @@ def probe_feature_set(df: pd.DataFrame, target_col: str):
         "primary_score": primary_score,
         "r2_lgbm": score_lgbm,
         "r2_nn": score_nn,
-        "num_features": X.shape[1]
+        "num_features": X.shape[1],
+        "importances": importances
     }
 
 def visualize_final_predictions(dates, y_true, y_pred, best_model_name, probe_name, best_model_metrics, results_dir):
@@ -472,6 +353,10 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
         'RandomForest': RandomForestRegressor(random_state=42),
         'XGBoost': XGBRegressor(random_state=42),
         'CatBoost': CatBoostRegressor(random_state=42, verbose=0),
+        'SVR': SVR(),
+        'Ridge': Ridge(random_state=42),
+        'Lasso': Lasso(random_state=42),
+        'KNeighbors': KNeighborsRegressor(),
         'TabNet': TabNetRegressor(cat_idxs=categorical_indices, cat_dims=cat_dims, seed=42, verbose=0),
         'SimpleNN': SimpleNN(X.shape[1]),
         'EnhancedNN': EnhancedNN(X.shape[1]),
@@ -493,6 +378,8 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
     scaler_y = MinMaxScaler()
     y_train_s = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
 
+    models_requiring_scaling = ['SVR', 'Ridge', 'Lasso', 'KNeighbors']
+
     for name, model in models.items():
         print(f"  - Evaluating {name}...")
         if name in ['SimpleNN', 'EnhancedNN', 'Transformer']:
@@ -507,6 +394,9 @@ def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: s
                 eval_metric=['rmse']
             )
             preds = model.predict(X_test.values).flatten()
+        elif name in models_requiring_scaling:
+            model.fit(X_train_s, y_train)
+            preds = model.predict(X_test_s)
         else: # LGBM, RF, XGB, CatBoost
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
@@ -571,10 +461,11 @@ class ExperienceReplayBuffer:
             for exp in good_samples:
                 r2 = exp['state'].get('R2 Score (raw)', -1.0)
                 num_feats = exp['state'].get('Number of Features', 'N/A')
-                features = exp['state']['Available Features']
+                # --- OPTIMIZATION: Summarize feature list in examples ---
+                summarized_features = TLAFS_Algorithm.summarize_feature_list(exp['state']['Available Features'])
                 plan = exp['action']
                 reward = exp['reward']
-                prompt_str += f"- PAST_CONTEXT: R²={r2:.3f}, #Feats={num_feats}, Feats={features}. PLAN: {plan}. OUTCOME: ADOPTED, reward={reward:.3f}.\n"
+                prompt_str += f"- PAST_CONTEXT: R²={r2:.3f}, #Feats={num_feats}, Feats={summarized_features}. PLAN: {plan}. OUTCOME: ADOPTED, reward={reward:.3f}.\n"
         
         if bad_samples:
             prompt_str += "\n**Failed Plans (Rejected):**\n"
@@ -694,242 +585,166 @@ class TLAFS_Algorithm:
     def pretrain_embedder(self, df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFrame, window_size: int, config: dict):
         """Pre-trains a masked autoencoder with validation and early stopping, and returns the trained ENCODER part."""
         
-        # --- NEW: Load the ProbeForecaster to be used for Perceptual Loss ---
         print("  - 检查ProbeForecaster模型是否可用...")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         probe_model_path = self.probe_model_path
         use_perceptual_loss = os.path.exists(probe_model_path)
         
+        perceptual_model = None
+        input_embed_layer = None
+        pos_encoder = None
+        perceptual_weight = 0.5 # Hyperparameter
+            
         if use_perceptual_loss:
-            print("  - 加载ProbeForecaster进行感知损失计算...")
-            probe_config = self.probe_config # Use the instance config
-            
-            # We only need the attention probe part of the forecaster
-            perceptual_model = AgentAttentionProbe(
-                d_model=probe_config['d_model'],
-                nhead=probe_config['nhead'],
-                num_agents=probe_config['num_agents']
-            ).to(device)
-            
-            # We need the full forecaster to load the state dict, then we extract the probe
-            full_probe_forecaster_model = ProbeForecaster(
-                input_dim=3, # temp, dayofweek, month - 这是ProbeForecaster的输入维度
-                d_model=probe_config['d_model'],
-                nhead=probe_config['nhead'],
-                num_agents=probe_config['num_agents'],
-                num_lags=probe_config['num_lags'],
-                num_exog=2 # dayofweek, month
-            ).to(device)
-            full_probe_forecaster_model.load_state_dict(torch.load(probe_model_path))
-            
-            # Transfer the learned weights to our perceptual model instance
-            perceptual_model.load_state_dict(full_probe_forecaster_model.attention_probe.state_dict())
-            perceptual_model.eval() # Set to evaluation mode, freeze weights
-            
-            # We also need the input embedding layer from the forecaster
-            input_embed_layer = full_probe_forecaster_model.input_embedding.to(device)
-            input_embed_layer.eval()
+            print("  - 尝试加载ProbeForecaster以启用感知损失...")
+            try:
+                probe_config = self.probe_config
+                perceptual_model = AgentAttentionProbe(
+                    d_model=probe_config['d_model'], nhead=probe_config['nhead'],
+                    num_agents=probe_config['num_agents']
+                ).to(device)
+                
+                full_probe_forecaster_model = ProbeForecaster(
+                    input_dim=3, d_model=probe_config['d_model'], nhead=probe_config['nhead'],
+                    num_agents=probe_config['num_agents'], num_lags=probe_config['num_lags'], num_exog=2
+                ).to(device)
+                
+                full_probe_forecaster_model.load_state_dict(torch.load(probe_model_path, map_location=device))
+                
+                perceptual_model.load_state_dict(full_probe_forecaster_model.attention_probe.state_dict())
+                perceptual_model.eval()
+                
+                input_embed_layer = full_probe_forecaster_model.input_embedding.to(device)
+                input_embed_layer.eval()
 
-            # We also need the positional encoding
-            pos_encoder = PositionalEncoding(d_model=probe_config['d_model']).to(device)
-        else:
-            print("  - ProbeForecaster模型未找到，将使用基础重建损失进行训练")
-            perceptual_model = None
-            input_embed_layer = None
-            pos_encoder = None
+                pos_encoder = PositionalEncoding(d_model=probe_config['d_model']).to(device)
+                print("  - ✅ ProbeForecaster加载成功，感知损失已启用。")
 
+            except Exception as e:
+                print(f"  - ⚠️ 警告：加载ProbeForecaster失败。原因: {e}")
+                print("  - 将回退到仅使用基础重建损失。")
+                use_perceptual_loss = False
+        
+        if not use_perceptual_loss:
+            print("  - 将使用基础重建损失进行训练。")
 
         input_dim = df_to_pretrain_on.shape[1]
-        print(f"  - Preparing data for masked autoencoder pre-training (window: {window_size}, input_dim: {input_dim})...")
+        print(f"  - 准备数据进行掩码自编码器预训练 (窗口: {window_size}, 输入维度: {input_dim})...")
         
-        # --- LEAKAGE FIX: Fit scaler ONLY on designated training data ---
         scaler = MinMaxScaler()
         scaler.fit(df_to_scale_on)
-        
-        # Transform the entire dataset for the pre-training process
         series_scaled = scaler.transform(df_to_pretrain_on)
         
-        sequences = []
-        for i in range(len(series_scaled) - window_size + 1):
-            sequences.append(series_scaled[i:i+window_size])
+        sequences = [series_scaled[i:i+window_size] for i in range(len(series_scaled) - window_size + 1)]
         
         if not sequences:
-            print("  - ⚠️ Warning: Not enough data for pre-training. Returning untrained encoder.")
+            print("  - ⚠️ 警告：数据不足，无法进行预训练。返回未训练的编码器。")
             return MaskedEncoder(input_dim=input_dim, hidden_dim=config['encoder_hidden_dim'], num_layers=config['encoder_layers'], final_embedding_dim=config['final_embedding_dim']), scaler
 
-        # --- Create Training and Validation Sets ---
         split_idx = int(len(sequences) * 0.8)
-        train_sequences = sequences[:split_idx]
-        val_sequences = sequences[split_idx:]
+        train_sequences, val_sequences = (sequences[:split_idx], sequences[split_idx:]) if split_idx > 0 else (sequences, [])
         
-        if len(val_sequences) == 0:
-            # Fallback for small datasets where validation set might be empty
-            print("  - ⚠️ Warning: Not enough data for a validation set. Training without early stopping.")
-            train_sequences = sequences
-            val_sequences = [] # Ensure val_loader is empty
+        if not val_sequences:
+            print("  - ⚠️ 警告：验证集为空，将不使用早停。")
 
         train_dataset = TensorDataset(torch.FloatTensor(np.array(train_sequences)))
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
         
-        val_loader = None
-        if val_sequences:
-            val_dataset = TensorDataset(torch.FloatTensor(np.array(val_sequences)))
-            val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
+        val_loader = DataLoader(TensorDataset(torch.FloatTensor(np.array(val_sequences))), batch_size=config['batch_size'], shuffle=False) if val_sequences else None
 
         autoencoder = MaskedTimeSeriesAutoencoder(
-            input_dim=input_dim,
-            encoder_hidden_dim=config['encoder_hidden_dim'],
-            encoder_layers=config['encoder_layers'],
-            decoder_hidden_dim=config['decoder_hidden_dim'],
-            decoder_layers=config['decoder_layers'],
-            final_embedding_dim=config['final_embedding_dim'],
-            seq_len=window_size
+            input_dim=input_dim, encoder_hidden_dim=config['encoder_hidden_dim'], encoder_layers=config['encoder_layers'],
+            decoder_hidden_dim=config['decoder_hidden_dim'], decoder_layers=config['decoder_layers'],
+            final_embedding_dim=config['final_embedding_dim'], seq_len=window_size
         ).to(device)
-        criterion_recon = nn.SmoothL1Loss() # Reconstruction Loss
-        criterion_perceptual = nn.MSELoss() # Perceptual Loss
+        criterion_recon = nn.SmoothL1Loss()
+        criterion_perceptual = nn.MSELoss()
         optimizer = optim.Adam(autoencoder.parameters(), lr=config['learning_rate'])
 
-        print(f"  - Pre-training Masked Autoencoder on {len(train_dataset)} sequences for up to {config['epochs']} epochs...")
-        if use_perceptual_loss:
-            print("  - 使用混合损失: 重建损失 + 感知损失 (来自ProbeForecaster)")
-        else:
-            print("  - 使用基础重建损失进行训练")
-
-        best_val_loss = float('inf')
-        epochs_no_improve = 0
-        best_model_state = None
+        print(f"  - 在 {len(train_dataset)} 个序列上预训练自编码器，最多 {config['epochs']} 个轮次...")
+        best_val_loss, epochs_no_improve, best_model_state = float('inf'), 0, None
 
         for epoch in range(config['epochs']):
-            # --- Training Phase ---
             autoencoder.train()
-            train_loss = 0
+            total_train_loss = 0
             for i, (batch,) in enumerate(train_loader):
                 batch = batch.to(device)
                 optimizer.zero_grad()
                 
-                # Masking logic
-                noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
+                noise = torch.rand(batch.shape, device=device)
                 unmasked_indices = noise > config['mask_ratio']
                 x_masked_input = batch.clone()
                 x_masked_input[~unmasked_indices] = 0
                 
                 reconstruction = autoencoder(x_masked_input)
-                
-                # --- LOSS CALCULATION (Now with Perceptual Loss) ---
                 loss_mask = ~unmasked_indices
-                
-                # 1. Standard Reconstruction Loss (on masked parts)
                 loss_r = criterion_recon(reconstruction[loss_mask], batch[loss_mask])
+                loss = loss_r
 
-                # 2. Perceptual Loss (only if available)
-                if use_perceptual_loss and perceptual_model is not None:
-                    with torch.no_grad(): # Ensure no gradients are computed for the perceptual model
-                        # The perceptual model expects a window of 365. We must slice our batch.
-                        if window_size >= 365:
-                            # To pass to the perceptual model, we need to embed the sequence first
-                            # The perceptual model works on the 'temp' column primarily.
-                            # This is a simplification. A more complex implementation would handle multiple features.
-                            
-                            # ProbeForecaster期望3个特征: temp, dayofweek, month
-                            # 我们需要从batch中提取这3个特征（假设它们在前3列）
-                            original_seq_for_perceptual = batch[:, -365:, :3] # Shape: (batch, 365, 3)
-                            recon_seq_for_perceptual = torch.cat([
-                                reconstruction[:, -365:, 0:1],  # temp (重建的)
-                                batch[:, -365:, 1:3]           # dayofweek, month (原始的，因为这些不需要重建)
-                            ], dim=-1) # Shape: (batch, 365, 3)
-                            
-                            # Embed and add positional encoding
-                            original_embedded = pos_encoder(input_embed_layer(original_seq_for_perceptual))
-                            recon_embedded = pos_encoder(input_embed_layer(recon_seq_for_perceptual))
-
-                            # Get feature embeddings from the probe
-                            original_features = perceptual_model(original_embedded)
-                            recon_features = perceptual_model(recon_embedded)
-                            
-                            loss_p = criterion_perceptual(recon_features, original_features)
-                        else:
-                            loss_p = 0.0 # Cannot compute if window is too small
-                    
-                    # 3. Combine losses with perceptual component
-                    perceptual_weight = 0.5 # Hyperparameter to balance the two losses
-                    loss = (1 - perceptual_weight) * loss_r + perceptual_weight * loss_p
-                else:
-                    # 3. Use only reconstruction loss
-                    loss = loss_r
-
+                if use_perceptual_loss and window_size >= 365:
+                    with torch.no_grad():
+                        original_seq_for_perceptual = batch[:, -365:, :3]
+                        recon_seq_for_perceptual = torch.cat([reconstruction[:, -365:, 0:1], batch[:, -365:, 1:3]], dim=-1)
+                        original_embedded = pos_encoder(input_embed_layer(original_seq_for_perceptual))
+                        recon_embedded = pos_encoder(input_embed_layer(recon_seq_for_perceptual))
+                        original_features = perceptual_model(original_embedded)
+                        recon_features = perceptual_model(recon_embedded)
+                        loss_p = criterion_perceptual(recon_features, original_features)
+                        loss = (1 - perceptual_weight) * loss_r + perceptual_weight * loss_p
+                
                 if torch.isfinite(loss):
                     loss.backward()
                     optimizer.step()
-                    train_loss += loss.item()
+                    total_train_loss += loss.item()
             
-            avg_train_loss = train_loss / (i + 1) if i > 0 else train_loss
+            avg_train_loss = total_train_loss / (i + 1) if train_loader else 0
+
+            if not val_loader:
+                if (epoch + 1) % 10 == 0: print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}")
+                continue
+
+            autoencoder.eval()
+            total_val_loss = 0
+            with torch.no_grad():
+                for i, (batch,) in enumerate(val_loader):
+                    batch = batch.to(device)
+                    noise = torch.rand(batch.shape, device=device)
+                    unmasked_indices = noise > config['mask_ratio']
+                    x_masked_input = batch.clone(); x_masked_input[~unmasked_indices] = 0
+                    reconstruction = autoencoder(x_masked_input)
+                    loss_mask = ~unmasked_indices
+                    loss_r_val = criterion_recon(reconstruction[loss_mask], batch[loss_mask])
+                    loss = loss_r_val
+
+                    if use_perceptual_loss and window_size >= 365:
+                        original_seq_for_perceptual = batch[:, -365:, :3]
+                        recon_seq_for_perceptual = torch.cat([reconstruction[:, -365:, 0:1], batch[:, -365:, 1:3]], dim=-1)
+                        original_embedded = pos_encoder(input_embed_layer(original_seq_for_perceptual))
+                        recon_embedded = pos_encoder(input_embed_layer(recon_seq_for_perceptual))
+                        original_features = perceptual_model(original_embedded)
+                        recon_features = perceptual_model(recon_embedded)
+                        loss_p_val = criterion_perceptual(recon_features, original_features)
+                        loss = (1 - perceptual_weight) * loss_r_val + perceptual_weight * loss_p_val
+                        
+                    if torch.isfinite(loss):
+                        total_val_loss += loss.item()
+
+            avg_val_loss = total_val_loss / (i + 1) if val_loader else 0
+            print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss, epochs_no_improve, best_model_state = avg_val_loss, 0, autoencoder.state_dict()
+            else:
+                epochs_no_improve += 1
             
-            # --- Validation Phase ---
-            if val_loader:
-                autoencoder.eval()
-                val_loss = 0
-                with torch.no_grad():
-                    for i, (batch,) in enumerate(val_loader):
-                        batch = batch.to(device)
-                        noise = torch.rand(batch.shape[0], batch.shape[1], device=device)
-                        unmasked_indices = noise > config['mask_ratio']
-                        x_masked_input = batch.clone()
-                        x_masked_input[~unmasked_indices] = 0
-                        
-                        reconstruction = autoencoder(x_masked_input)
-                        
-                        loss_mask = ~unmasked_indices
-                        
-                        # --- Validation Loss Calculation (Hybrid or Basic) ---
-                        loss_r_val = criterion_recon(reconstruction[loss_mask], batch[loss_mask])
-
-                        if use_perceptual_loss and perceptual_model is not None:
-                            if window_size >= 365:
-                                original_seq_for_perceptual = batch[:, -365:, :3] # Shape: (batch, 365, 3)
-                                recon_seq_for_perceptual = torch.cat([
-                                    reconstruction[:, -365:, 0:1],  # temp (重建的)
-                                    batch[:, -365:, 1:3]           # dayofweek, month (原始的)
-                                ], dim=-1) # Shape: (batch, 365, 3)
-                                original_embedded = pos_encoder(input_embed_layer(original_seq_for_perceptual))
-                                recon_embedded = pos_encoder(input_embed_layer(recon_seq_for_perceptual))
-                                original_features = perceptual_model(original_embedded)
-                                recon_features = perceptual_model(recon_embedded)
-                                loss_p_val = criterion_perceptual(recon_features, original_features)
-                            else:
-                                loss_p_val = 0.0
-
-                            loss = (1 - perceptual_weight) * loss_r_val + perceptual_weight * loss_p_val
-                        else:
-                            loss = loss_r_val
-
-                        if torch.isfinite(loss):
-                            val_loss += loss.item()
-
-                avg_val_loss = val_loss / (i + 1) if i > 0 else val_loss
-                print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
-
-                # --- Early Stopping Check ---
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    epochs_no_improve = 0
-                    best_model_state = autoencoder.state_dict()
-                    # print(f"      -> New best val_loss: {best_val_loss:.6f}")
-                else:
-                    epochs_no_improve += 1
-                
-                if epochs_no_improve >= config['patience']:
-                    print(f"    -- Early stopping triggered after {config['patience']} epochs. --")
-                    break
-            else: # No validation set
-                if (epoch + 1) % 10 == 0:
-                    print(f"    Epoch [{epoch+1}/{config['epochs']}], Train Loss: {avg_train_loss:.6f}")
+            if epochs_no_improve >= config['patience']:
+                print(f"    -- 早停触发于第 {epoch+1} 轮。 --")
+                break
         
-        # Load the best model if early stopping was used
         if best_model_state:
             autoencoder.load_state_dict(best_model_state)
         
-        # Visualize final reconstruction
         visualize_autoencoder_reconstruction(autoencoder.to('cpu'), train_loader, scaler, self.results_dir, config['mask_ratio'])
 
         return autoencoder.encoder.to("cpu"), scaler
@@ -1259,6 +1074,16 @@ class TLAFS_Algorithm:
                     temp_df = generate_probe_features(temp_df, config, model_path)
                     print("  - ✅ Probe features generated.")
 
+                elif op == "create_mvse_features":
+                    # --- 防御性检查：避免重复添加 ---
+                    if 'mvse_feat_0' in temp_df.columns:
+                        print("  - ⚠️ MVSE features already exist. Skipping operation.")
+                        continue
+                    
+                    print("  - Generating MVSE probe features...")
+                    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
+                    print("  - ✅ MVSE features generated.")
+
                 elif op == "delete_feature":
                     feature_to_delete = step.get("feature")
 
@@ -1295,12 +1120,16 @@ The target column is '{self.target_col}'.
         # --- Tool Definitions based on Stage ---
         basic_tools = """
 # *** STAGE 1: BASIC FEATURE ENGINEERING ***
-# Focus on creating a strong baseline with fundamental time-series features.
+# To replicate the success of strong manual feature engineering, you should consider applying these operations with multiple different windows/spans (e.g., 7, 14, 28).
 # AVAILABLE TOOLS:
 - {{"operation": "create_lag", "on": "feature_name", "days": int, "id": "..."}}
 - {{"operation": "create_diff", "on": "feature_name", "periods": int, "id": "..."}}
 - {{"operation": "create_rolling_mean", "on": "feature_name", "window": int, "id": "..."}}
 - {{"operation": "create_rolling_std", "on": "feature_name", "window": int, "id": "..."}}
+- {{"operation": "create_rolling_min", "on": "feature_name", "window": int, "id": "..."}}
+- {{"operation": "create_rolling_max", "on": "feature_name", "window": int, "id": "..."}}
+- {{"operation": "create_rolling_skew", "on": "feature_name", "window": int, "id": "..."}}
+- {{"operation": "create_rolling_kurt", "on": "feature_name", "window": int, "id": "..."}}
 - {{"operation": "create_ewm", "on": "feature_name", "span": int, "id": "..."}}
 - {{"operation": "create_fourier_features", "period": 365.25, "order": 4}}
 - {{"operation": "create_interaction", "features": ["feat1", "feat2"], "id": "..."}}
@@ -1317,11 +1146,25 @@ The target column is '{self.target_col}'.
 # 2. Meta-Forecast Features
 - {{"operation": "create_forecast_feature", "model_name": ["SimpleNN_meta", "EnhancedNN_meta"], "id": "UNIQUE_ID"}}
 
-# 3. Attention Probe Features (NEW & EXTREMELY POWERFUL)
-# This generates 512 features from a 365-day lookback window using an attention-based probe.
-# Use this to capture complex annual seasonality and long-term dependencies.
+# 3. Traditional Attention Probe Features (POWERFUL but HIGH-DIMENSIONAL)
+# This generates 70+ features from a 365-day lookback window using an attention-based probe.
 - {{"operation": "create_probe_features"}}
 """
+        
+        # --- NEW: Dynamically add MVSE tool if not already used ---
+        # Check if any column in the best_df starts with 'mvse_feat_'
+        mvse_already_exists = any(col.startswith('mvse_feat_') for col in self.best_df.columns)
+        
+        if not mvse_already_exists:
+            advanced_tools += """
+# 4. MVSE Probe Features (NEWEST & HIGHLY EFFICIENT) ⭐ RECOMMENDED ⭐
+# Multi-View Sequential Embedding: Uses 3 pooling strategies (GAP, GMP, MaskedGAP) to extract robust features.
+# Generates only 24 high-quality features (much fewer than traditional probe_features).
+# Excellent for capturing both trends and anomalies with strong robustness.
+# ADVANTAGE: Lower dimensionality, better generalization, faster training.
+- {{"operation": "create_mvse_features"}}
+"""
+
         # --- Rules ---
         rules = """
 *** RULES ***
@@ -1329,7 +1172,8 @@ The target column is '{self.target_col}'.
 - Propose short plans (1-3 steps).
 - For parameters shown with a list of options (e.g., "window": [90, 365]), you MUST CHOOSE ONLY ONE value (e.g., "window": 365). DO NOT return a list for the value.
 - `create_learned_embedding` is very powerful. Try interacting it with other features using `create_interaction`.
-- `create_probe_features` is the most advanced tool. It is computationally expensive but captures deep patterns. Use it when you need to understand long-term effects.
+- `create_mvse_features` is HIGHLY RECOMMENDED over `create_probe_features` due to better efficiency and lower overfitting risk.
+- `create_probe_features` is powerful but high-dimensional. Use it when you need maximum feature richness.
 - Do not try to compress `learned_embedding` or `probe_features` features; use them directly.
 """
 
@@ -1387,37 +1231,51 @@ The target column is '{self.target_col}'.
         
         context = {
             "Iteration": f"{iteration_num + 1}/{self.n_iterations}",
-            "Current Predictability Score": probe_results['primary_score'],
+            "Current Fusion Score": probe_results['primary_score'],
             "Historical Best Score": self.best_score,
             "R2 Score (LightGBM)": probe_results.get('r2_lgbm', 0.0),
             "R2 Score (SimpleNN)": probe_results.get('r2_nn', 0.0),
-            "Number of Features": len(available_features), # Report the true number of features
-            "Available Features": summarized_features, # But show the summarized list
+            "Number of Features": len(available_features),
+            "Available Features": summarized_features,
         }
+        
+        # NEW: Add feature importances to the context
+        importances = probe_results.get("importances")
+        if importances is not None and not importances.empty:
+            sorted_importances = importances.sort_values(ascending=False)
+            context["Top Features (High Importance)"] = sorted_importances.head(5).to_dict()
+            context["Bottom Features (Low Importance)"] = sorted_importances.tail(5).to_dict()
+            
         return context
 
     def format_prompt_for_llm(self, context_dict, in_context_examples_str):
         """Formats the context dictionary and examples into a string for the LLM."""
         prompt = "--- CURRENT STATE & TASK ---\n"
-        prompt += "The 'Predictability Score' measures how well a feature set can predict its own future. A higher score means the features are more informative and structured. Your goal is to maximize this score.\n"
+        prompt += "Your goal is to propose a feature engineering plan to improve the 'Current Fusion Score'.\n"
+        prompt += "Analyze the feature importances below. Consider deleting low-importance features or creating interactions between high-importance ones.\n"
         for key, value in context_dict.items():
             if isinstance(value, (float, np.floating)):
                  prompt += f"- {key}: {value:.4f}\n"
+            elif isinstance(value, dict):
+                prompt += f"- {key}:\n"
+                # Filter out zero-importance features for brevity
+                filtered_dict = {k: v for k, v in value.items() if v > 0} if "Importance" in key else value
+                for k, v in filtered_dict.items():
+                    prompt += f"  - {k}: {v:.6f}\n"
             else:
                 prompt += f"- {key}: {value}\n"
         
-        prompt += "\nAnalyze the current state and the historical examples. Propose a short, creative list of 1-2 operations to improve the predictability score."
+        prompt += "\nPropose a short, creative list of 1-2 operations to improve the score."
         prompt += in_context_examples_str
         return prompt
 
     def run(self):
         print(f"\n💡 Starting T-LAFS with Fusion Probe (RL Framework) ...\n")
         current_df = self.base_df.copy()
-        current_plan = []
         
         # Start with a simple, universally useful feature to give the LLM a good baseline.
         initial_plan = [
-            {"operation": "create_lag", "feature": self.target_col, "days": 1, "id": "lag1"}
+            {"operation": "create_lag", "on": self.target_col, "days": 1, "id": "lag1"}
         ]
         current_df = self.execute_plan(current_df, initial_plan)
         current_plan = initial_plan
@@ -1441,7 +1299,7 @@ The target column is '{self.target_col}'.
             print(f"\n----- ITERATION {i+1}/{self.n_iterations} (Probe: Fusion R²) -----")
             
             last_results = self.last_probe_results
-            print(f"  - Current Score (Fusion R²): {last_results['primary_score']:.4f} | R2_LGBM: {last_results.get('r2_lgbm', -1):.3f} | R2_NN: {last_results.get('r2_nn', -1):.3f} | #Feats: {last_results.get('num_features', -1)} | Best Score: {self.best_score:.4f}")
+            print(f"  - Current Best Score (Fusion R²): {self.best_score:.4f} | Last Score: {last_results['primary_score']:.4f} | R2_LGBM: {last_results.get('r2_lgbm', -1):.3f} | R2_NN: {last_results.get('r2_nn', -1):.3f} | #Feats: {last_results.get('num_features', -1)}")
 
             print("\nStep 1: Strategist LLM is devising a new feature combo plan...")
             
@@ -1451,13 +1309,14 @@ The target column is '{self.target_col}'.
             plan_extension = self.get_plan_from_llm(full_prompt, i, self.n_iterations)
             
             if not plan_extension:
-                self.history.append({"iteration": i + 1, "plan": [], "score": current_score, "adopted": False, "action": "noop"})
+                self.history.append({"iteration": i + 1, "plan": [], "score": last_results['primary_score'], "adopted": False, "action": "noop"})
                 continue
             
             print(f"✅ LLM Strategist proposed: {plan_extension}")
 
             print(f"\nStep 2: Probing the new feature combo plan...")
-            df_with_new_features = self.execute_plan(current_df, plan_extension)
+            # Always build upon the best known feature set
+            df_with_new_features = self.execute_plan(self.best_df.copy(), plan_extension)
             
             new_probe_results = probe_feature_set(df_with_new_features, self.target_col)
             new_score = new_probe_results["primary_score"]
@@ -1465,29 +1324,22 @@ The target column is '{self.target_col}'.
             print(f"  - Probe results: Fusion Score={new_score:.4f}, R2_LGBM: {new_probe_results.get('r2_lgbm', -1):.3f}, R2_NN: {new_probe_results.get('r2_nn', -1):.3f}, #Feats: {new_probe_results.get('num_features', -1)}")
             
             print(f"\nStep 3: Deciding whether to adopt the new plan...")
-            # We can use a smaller tolerance now that the probe is more stable
-            is_adopted = new_score > (self.best_score - 0.005) 
+            is_adopted = new_score > (self.best_score - 0.005)
             
-            reward = new_score - current_score
+            reward = new_score - self.best_score
             self.experience_buffer.push(current_state_context, plan_extension, reward, is_adopted)
             
             if is_adopted:
-                current_df = df_with_new_features.copy()
-                current_score = new_score
                 self.last_probe_results = new_probe_results
-                
-                if plan_extension:
-                    current_plan += plan_extension
+                print(f"  -> SUCCESS! Plan adopted. New score is {new_score:.4f}.")
                 
                 if new_score > self.best_score:
-                    print(f"  -> SUCCESS! New peak score {new_score:.4f} > best score {self.best_score:.4f}.")
+                    print(f"     -> And it's a NEW PEAK score, beating {self.best_score:.4f}!")
                     self.best_score = new_score
-                    self.best_df = current_df.copy()
-                    self.best_plan = current_plan.copy()
-                else:
-                    print(f"  -> TOLERATED. Score {new_score:.4f} is within threshold. Accepting for exploration.")
+                    self.best_df = df_with_new_features.copy()
+                    self.best_plan += plan_extension
             else:
-                print(f"  -> PLAN REJECTED. Score {new_score:.4f} is too low. Reverting to best known state for next iteration.")
+                print(f"  -> PLAN REJECTED. Score {new_score:.4f} is not a significant improvement over best score {self.best_score:.4f}. Reverting.")
             
             self.history.append({"iteration": i + 1, "plan": plan_extension, "probe_results": new_probe_results, "adopted": is_adopted, "reward": reward})
 
@@ -1500,7 +1352,7 @@ The target column is '{self.target_col}'.
 def main():
     """Main function to run the DAP experiment."""
     # ===== 配置变量 =====
-    DATASET_TYPE = 'total_cleaned'  # 可选: 'min_daily_temps' 或 'total_cleaned'
+    DATASET_TYPE = 'min_daily_temps'  # 可选: 'min_daily_temps' 或 'total_cleaned'
     
     # 实验配置
     N_ITERATIONS = 10
