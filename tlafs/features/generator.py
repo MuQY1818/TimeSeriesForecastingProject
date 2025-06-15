@@ -54,37 +54,106 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
             # 用于记录当前步骤生成特征的临时变量
             step_feature_name = None
 
-            # --- 新增的宏功能 ---
-            if op == "create_control_baseline_features":
-                print("  - 正在执行宏操作: create_control_baseline_features...")
-                target = args.get("col", target_col)
-                
-                # 1. 时间特征 (与control.py一致)
+            # --- Macro functions ---
+            if op == "create_time_features_macro":
+                print("  - Executing macro: create_time_features_macro...")
+                # These features don't create NaNs, so no fill needed.
                 temp_df['year'] = pd.to_datetime(temp_df['date']).dt.year
                 temp_df['month'] = pd.to_datetime(temp_df['date']).dt.month
                 temp_df['day'] = pd.to_datetime(temp_df['date']).dt.day
                 temp_df['dayofweek'] = pd.to_datetime(temp_df['date']).dt.dayofweek
+                step_feature_name = "time_features_macro_set"
+                print("  - ✅ Successfully generated time features macro set.")
+
+            elif op == "create_lag_features_macro":
+                print("  - Executing macro: create_lag_features_macro...")
+                target = args.get("col", target_col)
+                lags_to_create = [1, 2, 3, 7, 14]
+                feature_names = []
+                for lag in lags_to_create:
+                    fname = f'{target}_lag_{lag}'
+                    temp_df[fname] = temp_df[target].shift(lag)
+                    feature_names.append(fname)
+                # Fill NaNs for the newly created columns
+                temp_df[feature_names] = temp_df[feature_names].ffill().fillna(0)
+                step_feature_name = f"lag_features_macro_set_on_{target}"
+                print(f"  - ✅ Successfully generated lag features macro set for '{target}'.")
+
+            elif op == "create_rolling_features_macro":
+                print("  - Executing macro: create_rolling_features_macro...")
+                target = args.get("col", target_col)
+                windows_to_create = [7, 14, 30]
+                aggs_to_create = ['mean', 'std']
+                feature_names = []
+                for window in windows_to_create:
+                    for agg in aggs_to_create:
+                        fname = f'{target}_rolling_{agg}_{window}'
+                        temp_df[fname] = temp_df[target].rolling(window=window).agg(agg).shift(1)
+                        feature_names.append(fname)
+                # Fill NaNs for the newly created columns
+                temp_df[feature_names] = temp_df[feature_names].ffill().fillna(0)
+                step_feature_name = f"rolling_features_macro_set_on_{target}"
+                print(f"  - ✅ Successfully generated rolling features macro set for '{target}'.")
+
+            elif op == "create_kitchen_sink_features_macro":
+                print("  - 💥 Executing the 'Kitchen Sink' macro to generate a massive feature set...")
+                target = args.get("col", target_col)
                 
-                # 2. 滞后特征
-                for lag in [1, 2, 3, 7, 14]:
+                # 1. Extensive Time Features
+                date_col = pd.to_datetime(temp_df['date'])
+                temp_df['year'] = date_col.dt.year
+                temp_df['month'] = date_col.dt.month
+                temp_df['day'] = date_col.dt.day
+                temp_df['dayofweek'] = date_col.dt.dayofweek
+                temp_df['dayofyear'] = date_col.dt.dayofyear
+                temp_df['weekofyear'] = date_col.dt.isocalendar().week.astype(int)
+                temp_df['quarter'] = date_col.dt.quarter
+                temp_df['is_month_start'] = date_col.dt.is_month_start.astype(int)
+                temp_df['is_month_end'] = date_col.dt.is_month_end.astype(int)
+                temp_df['is_quarter_start'] = date_col.dt.is_quarter_start.astype(int)
+                temp_df['is_quarter_end'] = date_col.dt.is_quarter_end.astype(int)
+                temp_df['is_year_start'] = date_col.dt.is_year_start.astype(int)
+                temp_df['is_year_end'] = date_col.dt.is_year_end.astype(int)
+
+                # 2. Extensive Lag Features
+                lags = list(range(1, 16)) + [21, 28, 35, 60, 90, 180, 365] # ~40 features
+                for lag in lags:
                     temp_df[f'{target}_lag_{lag}'] = temp_df[target].shift(lag)
-                
-                # 3. 滚动统计特征
-                for window in [7, 14, 30]:
-                    temp_df[f'{target}_rolling_mean_{window}'] = temp_df[target].rolling(window=window).mean().shift(1)
-                    temp_df[f'{target}_rolling_std_{window}'] = temp_df[target].rolling(window=window).std().shift(1)
-                    temp_df[f'{target}_rolling_min_{window}'] = temp_df[target].rolling(window=window).min().shift(1)
-                    temp_df[f'{target}_rolling_max_{window}'] = temp_df[target].rolling(window=window).max().shift(1)
-                
-                # 由于创建了大量滞后和滚动特征，会引入NaN，这里我们用0填充
-                # 这与control.py中的dropna()行为不同，但更符合T-LAFS的迭代性质
+
+                # 3. Extensive Rolling Features
+                windows = [7, 14, 28, 60, 90]
+                aggs = ['mean', 'std', 'min', 'max', 'median'] # 5 aggs * 5 windows = 25 features
+                for window in windows:
+                    rolling = temp_df[target].rolling(window=window)
+                    for agg in aggs:
+                        temp_df[f'{target}_rolling_{agg}_{window}'] = rolling.agg(agg).shift(1)
+
+                # 4. Fourier Features
+                year_length = 365.25
+                for k in range(1, 11): # 10 orders = 20 features
+                    temp_df[f"fourier_sin_{k}"] = np.sin(2 * np.pi * k * temp_df['dayofyear'] / year_length)
+                    temp_df[f"fourier_cos_{k}"] = np.cos(2 * np.pi * k * temp_df['dayofyear'] / year_length)
+
+                # 5. Interaction Features (safe ones)
+                # Create lags first to interact with
+                if f'{target}_lag_1' not in temp_df.columns:
+                     temp_df[f'{target}_lag_1'] = temp_df[target].shift(1)
+                if f'{target}_lag_7' not in temp_df.columns:
+                     temp_df[f'{target}_lag_7'] = temp_df[target].shift(7)
+
+                time_features_for_interaction = ['dayofweek', 'month', 'weekofyear', 'quarter']
+                for col in time_features_for_interaction:
+                    temp_df[f"{col}_x_lag1"] = temp_df[col] * temp_df[f'{target}_lag_1']
+                    temp_df[f"{col}_x_lag7"] = temp_df[col] * temp_df[f'{target}_lag_7']
+
+                # Final cleanup
                 temp_df.fillna(0, inplace=True)
                 
-                # 对于宏操作，我们返回一个描述性的名字
-                step_feature_name = "control_baseline_features_set"
-                print("  - ✅ 成功生成了control基线特征集。")
+                step_feature_name = "kitchen_sink_macro_set"
+                num_features = len(temp_df.columns) - len(df.columns)
+                print(f"  - ✅ Generated ~{num_features} new features with the Kitchen Sink macro.")
 
-            # --- 基础时序特征 ---
+            # --- Basic time series features ---
             elif op == "create_lag_features":
                 col = args.get("col")
                 lags = args.get("lags", [1])
@@ -104,26 +173,26 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
             elif op == "create_interaction_features":
                 col1 = args.get("col1")
                 col2 = args.get("col2")
-                # --- 数据泄露防火墙 ---
+                # --- Data leakage firewall ---
                 if col1 == target_col or col2 == target_col:
-                    print(f"  - 🛑 数据泄露警告: 交互特征不能直接使用原始目标列 ('{target_col}')。跳过此步骤。")
+                    print(f"  - 🛑 Data leakage warning: Cannot use target column ('{target_col}') directly. Skipping.")
                     continue
                 
                 if col1 in temp_df.columns and col2 in temp_df.columns:
                     step_feature_name = f"{col1}_x_{col2}"
                     temp_df[step_feature_name] = temp_df[col1] * temp_df[col2]
                 else:
-                    print(f"  - ⚠️ 交互特征的列不存在: {col1} or {col2}。跳过此步骤。")
+                    print(f"  - ⚠️ Columns not found: {col1} or {col2}. Skipping.")
                     continue
             
             elif op == "create_fourier_features":
                 col = args.get("col")
                 order = int(args.get("order", 1))
                 if col != 'date' or col not in temp_df.columns:
-                    print(f"  - ⚠️ 傅里叶特征必须基于'date'列。跳过此步骤。")
+                    print(f"  - ⚠️ Fourier features must use 'date' column. Skipping.")
                     continue
                 
-                print(f"  - 正在为 '{col}' 创建 {order} 阶傅里叶特征...")
+                print(f"  - Creating {order}th order Fourier features for '{col}'...")
                 day_of_year = pd.to_datetime(temp_df[col]).dt.dayofyear
                 year_length = 365.25
                 
@@ -133,7 +202,6 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
                     temp_df[sin_col] = np.sin(2 * np.pi * k * day_of_year / year_length)
                     temp_df[cos_col] = np.cos(2 * np.pi * k * day_of_year / year_length)
                 
-                # 对于多特征操作，返回一个描述性名称
                 step_feature_name = f"fourier_features_order_{order}"
 
             elif op == "delete_features":
@@ -143,20 +211,15 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
                 
                 existing_cols = [c for c in cols_to_delete if c in temp_df.columns]
                 if existing_cols:
-                    print(f"  - 正在删除特征: {existing_cols}")
+                    print(f"  - Deleting features: {existing_cols}")
                     temp_df.drop(columns=existing_cols, inplace=True)
                     step_feature_name = f"deleted_{len(existing_cols)}_features"
                 else:
-                    print(f"  - ⚠️ 想要删除的特征不存在: {cols_to_delete}。跳过此步骤。")
+                    print(f"  - ⚠️ Features not found: {cols_to_delete}. Skipping.")
                     continue
 
-            # --- 从 specialist_tlafs_experiment.py 中添加所有其他特征生成逻辑 ---
-            # ... 例如: create_diff, create_ewm, 
-            # ... create_time_features, create_fourier_features,
-            # ... create_embedding_features, create_forecast_feature, etc.
-            
-            elif op == "create_embedding_features": # 同样更新为新的函数/参数格式
-                col = args.get("col") # 虽然未使用，但保持一致性
+            elif op == "create_embedding_features":
+                col = args.get("col")
                 window_size = args.get("window_size", 90)
                 
                 embedder = pretrained_encoders.get(window_size)
@@ -171,14 +234,14 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
                          temp_df['weekofyear'] = temp_df['date'].dt.isocalendar().week.astype(int)
                          temp_df['is_weekend'] = (temp_df['date'].dt.dayofweek >= 5).astype(int)
 
-                    print(f"  - 正在从 {len(pretrain_cols)} 个特征生成多变量嵌入 (窗口:{window_size})...")
+                    print(f"  - Generating multivariate embeddings from {len(pretrain_cols)} features (window:{window_size})...")
                     df_for_embedding = temp_df[pretrain_cols]
                     scaled_features = scaler.transform(df_for_embedding)
                     
                     sequences = np.array([scaled_features[i:i+window_size] for i in range(len(scaled_features) - window_size + 1)])
                     
                     if sequences.size == 0:
-                        print(f"  - ⚠️ 数据不足以创建窗口为 {window_size} 的嵌入。跳过。")
+                        print(f"  - ⚠️ Insufficient data for window {window_size}. Skipping.")
                         continue
                         
                     tensor = torch.FloatTensor(sequences)
@@ -186,7 +249,6 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
                         embeddings = embedder(tensor).numpy()
                         
                     valid_indices = temp_df.index[window_size-1:]
-                    # 由于可能一次性生成多个特征，我们只将第一个作为"新特征"返回以供记录
                     cols = [f"embed_{i}_win{window_size}" for i in range(embeddings.shape[1])]
                     step_feature_name = cols[0]
                     
@@ -199,31 +261,26 @@ def execute_plan(df: pd.DataFrame, plan: list, tlafs_params: dict):
                     temp_df = temp_df.join(embed_df)
                     temp_df[cols] = temp_df[cols].shift(1).ffill().fillna(0)
                 else:
-                    print(f"  - ⚠️ 窗口 {window_size} 的嵌入器不可用。跳过此步骤。")
+                    print(f"  - ⚠️ Embedder not available for window {window_size}. Skipping.")
                     continue
 
-            # --- 其他操作的elif块 ---
             else:
-                print(f"  - ⚠️ 未知的操作: {op}。跳过此步骤。")
+                print(f"  - ⚠️ Unknown operation: {op}. Skipping.")
                 continue
             
-            # 如果步骤成功，记录其名称
             if step_feature_name:
                 executed_feature_names.append(step_feature_name)
 
         except Exception as e:
             import traceback
-            print(f"  - ❌ 执行步骤 {step} 时发生严重错误，已跳过。错误: {e}\n{traceback.format_exc()}")
+            print(f"  - ❌ Error executing step {step}, skipped. Error: {e}\n{traceback.format_exc()}")
             continue
     
-    # 最终返回逻辑
     if not df.equals(temp_df) and executed_feature_names:
-        # 如果Dataframe有变化，并且我们成功执行了至少一个步骤
         final_name = ", ".join(executed_feature_names)
         return temp_df, final_name
     else:
-        # 如果计划为空，或所有步骤都失败/跳过
-        print("  - ⚠️ 计划执行后未成功生成任何新特征。")
+        print("  - ⚠️ No new features generated after plan execution.")
         return None, None
 
     return temp_df 

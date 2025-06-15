@@ -265,44 +265,42 @@ class TLAFS_Algorithm:
             TLAFS_Algorithm.embedder_scalers[window_size] = scaler
 
     def _log_baseline_performance(self):
-        """Calculates and logs the initial baseline performance without any generated features."""
-        from ..utils.evaluation import probe_feature_set
-        print("\nEstablishing baseline performance...")
-        # Baseline features are just the original non-target columns that are numeric
-        initial_features = [col for col in self.base_df.columns if col not in ['date', self.target_col] and pd.api.types.is_numeric_dtype(self.base_df[col])]
-        if not initial_features:
-            print("No initial numeric features to establish a baseline. Setting baseline score to 0.")
-            baseline_score = 0.0
-            initial_features = []
-        else:
-            baseline_df = self.base_df[initial_features + [self.target_col]].copy()
-            # The probe function needs to handle the case where the dataframe might be simple
-            baseline_score, _ = probe_feature_set(baseline_df, self.target_col, features_to_probe=initial_features)
-        
+        """Calculates and logs the initial baseline performance, starting from scratch."""
+        print("\nEstablishing baseline performance from scratch...")
+        # Start with no features. The baseline score is 0 for R^2,
+        # representing a model that just predicts the mean.
+        baseline_score = 0.0
+        initial_features = []
+        initial_importances = pd.DataFrame()
+
         self.best_score = baseline_score
+        # The base_df still contains the target and date, but we start with an empty feature list
+        self.best_df = self.base_df[['date', self.target_col]].copy()
+        
         self.history.append({
             "iteration": 0,
             "plan": "Baseline",
             "feature_name": "Baseline",
             "performance": baseline_score,
             "adopted": True,
-            "available_features": initial_features
+            "available_features": initial_features,
+            "importances": initial_importances
         })
-        print(f"Baseline R² score: {baseline_score:.4f} with features: {initial_features}")
+        print(f"Baseline R² score: {baseline_score:.4f} with no initial features.")
 
     def _format_history_for_prompt(self):
-        """将算法历史格式化为对LLM有意义的、包含边际贡献的字符串。"""
+        """Format algorithm history into a meaningful string with marginal contributions."""
         if not self.history:
             return "No history yet."
 
-        prompt_str = "--- 历史记录与边际贡献分析 ---\n"
-        prompt_str += "你将根据以下历史记录制定新的计划。请仔细分析每一步的得失。\n"
+        prompt_str = "--- History & Marginal Contribution Analysis ---\n"
+        prompt_str += "Analyze the following history to create new plans.\n"
 
-        # 第一个条目是基线
+        # First entry is baseline
         baseline = self.history[0]
-        prompt_str += f"第0步 (基线): 使用特征 {self.summarize_feature_list(baseline['available_features'])}，我们得到的初始R²为 {baseline['performance']:.4f}。\n"
+        prompt_str += f"Step 0 (Baseline): Using features {self.summarize_feature_list(baseline['available_features'])}, initial R²: {baseline['performance']:.4f}.\n"
 
-        # 后续的迭代
+        # Subsequent iterations
         for i in range(1, len(self.history)):
             current_step = self.history[i]
             prev_step = self.history[i-1]
@@ -314,40 +312,46 @@ class TLAFS_Algorithm:
             marginal_contribution = performance - prev_performance
             adopted = current_step['adopted']
             
-            status = "✅ (已采纳)" if adopted else "❌ (已拒绝)"
+            status = "✅ (Adopted)" if adopted else "❌ (Rejected)"
             analysis = ""
             if adopted:
                 if marginal_contribution > 0.001:
-                    analysis = f"性能显著提升了 {marginal_contribution:+.4f}。这是一个成功的特征，请考虑其模式。"
-                elif marginal_contribution > -0.001:
-                    analysis = f"性能略微提升 {marginal_contribution:+.4f}。这是一个中性的特征。"
+                    analysis = f"Significant improvement: {marginal_contribution:+.4f}. This is a successful feature pattern."
+                elif marginal_contribution >= 0:
+                    analysis = f"Slight improvement or neutral: {marginal_contribution:+.4f}. This is a neutral feature."
                 else:
-                    analysis = f"性能意外下降了 {marginal_contribution:+.4f}。这是一个'有毒'特征，请避免生成类似的特征。"
-            else: # 被拒绝
-                analysis = f"计划被拒绝，因为它没有带来足够的性能提升 (阈值: {self.acceptance_threshold})。"
+                    analysis = f"Unexpected performance drop: {marginal_contribution:+.4f}. This is a 'toxic' feature pattern to avoid."
+            else:
+                analysis = f"Plan rejected due to insufficient performance improvement (threshold: {self.acceptance_threshold})."
+            
+            # Feature importance info
+            importance_info = ""
+            if 'importances' in current_step and current_step['importances'] is not None and not current_step['importances'].empty:
+                top_5 = current_step['importances'].head(5)
+                bottom_5 = current_step['importances'][current_step['importances']['importance'] <= 0].tail(5)
+                importance_info += f"\n  - Top 5 features: {top_5['feature'].tolist()}"
+                if not bottom_5.empty:
+                    importance_info += f"\n  - Bottom 5 features: {bottom_5['feature'].tolist()}"
 
             prompt_str += (
-                f"\n第{i}步: \n"
-                f"  - 计划: {plan}\n"
-                f"  - 生成的特征: '{feature_name}'\n"
-                f"  - 结果: 新的R²为 {performance:.4f}。{status}\n"
-                f"  - 分析: {analysis}\n"
+                f"\nStep {i}:\n"
+                f"  - Plan: {plan}\n"
+                f"  - Generated feature: '{feature_name}'\n"
+                f"  - Result: New R²: {performance:.4f}. {status}\n"
+                f"  - Analysis: {analysis}{importance_info}\n"
             )
         
-        # --- 新增: 策略分析概要 ---
+        # Strategy analysis summary
         successful_ops = defaultdict(int)
         failed_ops = defaultdict(int)
-        # 从第1次迭代开始分析（跳过基线和强制宏）
         analysis_start_index = 1
-        # --- Bug修复：增加对history长度的检查 ---
         if len(self.history) > 1 and self.history[1]['plan'].startswith("{'function': 'create_control_baseline_features'"):
             analysis_start_index = 2
 
-        # --- Bug修复：确保索引起点不超过列表长度 ---
         if analysis_start_index < len(self.history):
             for step in self.history[analysis_start_index:]:
                 plan_str = step['plan']
-                match = re.search(r"'function':\s*'([^']*)'", plan_str)
+                match = re.search(r"['\"]function['\"]\s*:\s*['\"]([^'\"]*)['\"]", plan_str)
                 if match:
                     op_name = match.group(1)
                     if step['adopted']:
@@ -355,16 +359,16 @@ class TLAFS_Algorithm:
                     else:
                         failed_ops[op_name] += 1
 
-        analysis_summary = "\n--- 策略分析 ---\n"
+        analysis_summary = "\n--- Strategy Analysis ---\n"
         if successful_ops or failed_ops:
-            analysis_summary += "根据过往记录，你的策略表现如下：\n"
+            analysis_summary += "Based on history, your strategy performance:\n"
             if successful_ops:
-                analysis_summary += f"  - ✅ 成功的操作类型: {json.dumps(dict(successful_ops))}\n"
+                analysis_summary += f"  - ✅ Successful operations: {json.dumps(dict(successful_ops))}\n"
             if failed_ops:
-                analysis_summary += f"  - ❌ 失败的操作类型: {json.dumps(dict(failed_ops))}\n"
-            analysis_summary += "请根据以上统计，优先考虑成功的操作类型，避免重复失败。\n"
+                analysis_summary += f"  - ❌ Failed operations: {json.dumps(dict(failed_ops))}\n"
+            analysis_summary += "Prioritize successful operations, avoid repeating failures.\n"
         else:
-            analysis_summary += "尚无足够历史进行分析。请开始你的探索。\n"
+            analysis_summary += "Insufficient history for analysis. Begin exploration.\n"
         
         prompt_str += analysis_summary
         prompt_str += "\n--- End of History ---\n"
@@ -372,77 +376,100 @@ class TLAFS_Algorithm:
 
 
     def _generate_prompt(self, iteration_num, importance_report=None):
-        """为LLM生成一个完整的、结构化的提示。"""
+        """Generate a complete, structured prompt for LLM."""
         
-        # 1. 初始上下文（只在第一次迭代时显示）
+        # 1. Initial context (only shown in first iteration)
         initial_context = ""
         if iteration_num == 1:
-            initial_context = "--- 数据集分析报告 ---\n"
+            initial_context = "--- Dataset Analysis Report ---\n"
             for key, value in self.dataset_analysis.items():
                 initial_context += f"- {key}: {value}\n"
-            initial_context += "请基于以上报告开始你的特征工程计划。\n"
+            initial_context += "Begin feature engineering based on this report.\n"
 
-        # 2. 历史分析
+        # 2. History analysis
         history_summary = self._format_history_for_prompt()
 
-        # 3. 当前状态与任务
+        # 3. Current state & task
         current_features = self.history[-1]['available_features']
         summarized_features = self.summarize_feature_list(current_features)
         current_performance = self.history[-1]['performance']
         
         state_summary = (
-            "--- 当前状态与任务 ---\n"
-            f"当前是第 {iteration_num}/{self.n_iterations} 次迭代。\n"
-            f"当前特征集 ({len(current_features)}个): {summarized_features}\n"
-            f"当前R²分数为: {current_performance:.4f}\n\n"
+            "--- Current State & Task ---\n"
+            f"Iteration {iteration_num}/{self.n_iterations}\n"
+            f"Current features ({len(current_features)}): {summarized_features}\n"
+            f"Current R²: {current_performance:.4f}\n\n"
         )
         
-        # 4. 动态任务指令（常规 vs 复盘）
+        # Tactical observations
+        last_importance_df = self.history[-1].get('importances')
+        if last_importance_df is not None and not last_importance_df.empty:
+            top_5 = last_importance_df.head(5)['feature'].tolist()
+            bottom_5 = last_importance_df[last_importance_df['importance'] <= 0].tail(5)['feature'].tolist()
+            state_summary += (
+                "--- Tactical Observations ---\n"
+                f"📈 Top 5 features: {top_5}\n"
+            )
+            if bottom_5:
+                state_summary += f"📉 Bottom 5 features: {bottom_5}\n\n"
+            else:
+                 state_summary += "\n"
+
+        # 4. Dynamic task instruction (regular vs review)
         task_instruction = ""
         if importance_report is not None:
             useless_features = importance_report[importance_report['importance_mean'] <= 0].index.tolist()
             task_instruction = (
-                "**特殊任务：复盘与优化**\n"
-                "我们进行了一次特征重要性分析，报告如下：\n"
+                "**Special Task: Review & Optimization**\n"
+                "Feature importance analysis results:\n"
                 f"{importance_report.to_string()}\n"
-                f"分析表明，以下特征可能是无用或有害的: {useless_features}\n"
-                "你的任务是：提出一个**包含 `delete_features` 操作**的计划来清理这些特征，并可以结合其他操作进一步提升性能。\n"
             )
+            if useless_features:
+                 task_instruction += (
+                    f"Analysis shows these features may be useless or harmful: {useless_features}\n"
+                    "Your primary task is aggressive feature pruning. Create a plan to **delete all zero or negative importance features at once**. Then, you can combine other operations to further improve performance.\n"
+                 )
+            else:
+                task_instruction += "All features are performing well. Focus on adding new features.\n"
+
         else:
-            task_instruction = "你的任务是：基于历史和当前状态，提出一个包含**1-3个操作**的特征工程计划来提升性能。\n"
+            task_instruction = "Your task: Based on history and current state, propose a feature engineering plan with **1-3 operations** to improve performance.\n"
         
         state_summary += task_instruction
 
-        # 5. 函数定义和指令
-        instructions = """
---- 可用函数与指令 ---
-你只能从以下函数中选择一个或多个来调用：
+        # 5. Function definitions and instructions - use .format() and escape JSON brackets
+        instructions_template = """
+--- Available Functions & Instructions ---
+Choose one or more functions:
 
-**宏功能:**
-1. `create_control_baseline_features(df, col)`: 一次性创建一套被证明有效的基础特征。
+**Macro Functions:**
+1. `create_time_features_macro(df)`: Creates a set of standard time-based features (year, month, day, dayofweek).
+2. `create_lag_features_macro(df, col)`: Creates a set of standard lag features (lags 1, 2, 3, 7, 14).
+3. `create_rolling_features_macro(df, col)`: Creates a set of standard rolling window features (windows 7, 14, 30 for mean/std).
 
-**基础功能:**
-2. `create_lag_features(df, col, lags)`: 创建滞后特征。
-3. `create_rolling_features(df, col, windows, aggs)`: 创建滚动特征。
-4. `create_fourier_features(df, col, order)`: 创建傅里叶特征 (注意: `col` 参数必须是 'date')。
-5. `create_interaction_features(df, col1, col2)`: 创建交互特征。
-6. `create_embedding_features(df, col, window_size)`: 创建嵌入特征 (可用size: 90, 365, 730)。
+**Basic Functions:**
+4. `create_lag_features(df, col, lags)`: Create specific lag features.
+5. `create_rolling_features(df, col, windows, aggs)`: Create specific rolling features.
+6. `create_fourier_features(df, col, order)`: Create Fourier features (note: `col` must be 'date').
+7. `create_interaction_features(df, col1, col2)`: Create interaction features.
+8. `create_embedding_features(df, col, window_size)`: Create embedding features (sizes: 90, 365, 730).
 
-**优化功能:**
-7. `delete_features(df, cols)`: 删除一个或多个特征。
+**Optimization Functions:**
+9. `delete_features(df, cols)`: Delete one or more features.
 
-**输出格式:**
-你的回答必须是一个不含任何解释的、严格的JSON**列表**，即使只有一个操作也要在列表中：
-`[{"function": "func_name", "args": {...}}, ...]`
+**Output Format:**
+Your response must be a strict JSON list, even for single operations:
+`[{{"function": "func_name", "args": {{"key": "value"}}}}, ...]`
 
-**重要规则:**
-- 计划可以包含1到3个操作。
-- 只能使用当前特征集中的列。
-- **进行复盘任务时，必须包含 `delete_features` 操作。**
-- **数据泄露警告：`create_interaction_features` 绝不能直接使用目标列 ('{self.target_col}')。如果你想使用目标值的信息，必须先创建它的滞后或滚动特征 (例如 `temp_lag_1`)，然后与那个新生成的、无泄漏的特征进行交互。**
-- **策略指导：避免重复提交近期已被拒绝的计划或特征。请尝试更多样化的策略。**
-- **`create_control_baseline_features` 只能在第一步使用，后续迭代不应再调用。**
+**Key Rules:**
+- Plan can include 1-3 operations.
+- Only use columns from current feature set.
+- **For review tasks, must include `delete_features` operation.**
+- **Data Leakage Warning: `create_interaction_features` cannot use target column ('{target_col}') directly. If you need target info, first create lag/rolling features.**
+- **Strategy 1: Avoid repeating recently rejected plans. Try more diverse strategies.**
+- **Strategy 2: If simple feature combinations aren't helping, try `create_embedding_features` for complex non-linear relationships.**
 """
+        instructions = instructions_template.format(target_col=self.target_col)
         
         return initial_context + history_summary + state_summary + instructions
 
@@ -465,133 +492,115 @@ class TLAFS_Algorithm:
         except Exception as e:
             print(f"❌ 解析LLM响应时出错: {e}")
             print("将使用一个备用计划。")
-            fallback_col = random.choice(self.history[-1]['available_features'])
-            return [{"function": "create_lag_features", "args": {"col": fallback_col, "lags": [random.randint(1, 14)]}}]
+            # 改进备用计划：更有可能成功
+            current_features = self.history[-1]['available_features']
+            lag_cols = [f for f in current_features if 'lag' in f or f == self.target_col]
+            chosen_col = random.choice(lag_cols) if lag_cols else self.target_col
+            return [{"function": "create_rolling_features", "args": {"col": chosen_col, "windows": [random.choice([7,14,30])], "aggs": ["mean"]}}]
+
     
     def run(self, execute_plan_func, probe_func):
         """
-        运行T-LAFS算法的主循环。
+        Main loop for T-LAFS algorithm.
         """
         print("\n" + "="*80)
-        print("🚀 开始T-LAFS特征搜索循环...")
+        print("🚀 Starting T-LAFS feature search loop...")
         print("="*80)
 
-        # Bug修复: 确保best_df始终包含所有必要的列，特别是'date'
-        self.best_df = self.base_df.copy()
+        # --- Build tlafs_params ---
+        tlafs_params = {
+            "target_col_static": self.target_col,
+            "pretrain_cols_static": TLAFS_Algorithm.pretrain_cols_static,
+            "pretrained_encoders": TLAFS_Algorithm.pretrained_encoders,
+            "embedder_scalers": TLAFS_Algorithm.embedder_scalers
+        }
 
-        # --- 强制执行 'control' 基线特征作为第0步 ---
-        print("\n" + "="*40)
-        print("🚀 步骤 0: 强制执行'control.py'特征工程宏")
-        print("="*40)
+        # self.best_df is now initialized in _log_baseline_performance
         
-        control_plan = {"function": "create_control_baseline_features", "args": {"col": self.target_col}}
-        # 使用self.best_df（即self.base_df的副本）来执行计划
-        temp_df, new_feature_name = execute_plan_func(self.best_df.copy(), control_plan)
-        
-        if temp_df is not None and new_feature_name is not None:
-            features_to_probe = [c for c in temp_df.columns if c not in ['date', self.target_col]]
-            new_score, _ = probe_func(temp_df, self.target_col, features_to_probe)
-            
-            improvement = new_score - self.best_score
-            print(f"  - 'control'宏生成特征集，探测 R²: {new_score:.4f} (提升: {improvement:+.4f})")
-            
-            # 这个强制步骤总是被采纳，形成新的、更强的基线
-            self.best_score = new_score
-            self.best_df = temp_df
-            
-            # 记录这个强制步骤
-            self.history.append({
-                "iteration": "Baseline+",
-                "plan": str(control_plan),
-                "feature_name": new_feature_name,
-                "performance": new_score,
-                "adopted": True,
-                "available_features": features_to_probe
-            })
-        else:
-            print("⚠️ 'control'宏特征生成失败。继续使用原始基线。")
+        # --- Removed forced 'control' baseline features ---
+        # The LLM now decides how to start building features from scratch.
+        # The `create_control_baseline_features` macro is available if it chooses.
 
-
-        # --- 迭代探索循环 ---
+        # --- Iterative exploration loop ---
         for i in range(1, self.n_iterations + 1):
             
-            # --- 新增：周期性复盘逻辑 ---
+            # Periodic review logic
             if i > 1 and i % self.review_interval == 0:
                 print("\n" + "="*50)
-                print(f"🔬 触发周期性复盘 (迭代 {i}) 🔬")
+                print(f"🔬 Triggering periodic review (Iteration {i}) 🔬")
                 print("="*50)
                 
-                # 1. 运行排列重要性分析
+                # 1. Run permutation importance analysis
                 current_features = self.history[-1]['available_features']
-                X_val = self.best_df[current_features]
-                y_val = self.best_df[self.target_col]
+                df_for_importance = self.best_df.dropna(subset=current_features + [self.target_col])
+                X_val = df_for_importance[current_features]
+                y_val = df_for_importance[self.target_col]
                 
-                # 创建一个临时模型用于分析
                 lgbm = lgb.LGBMRegressor(random_state=42, verbosity=-1)
-                lgbm.fit(X_val, y_val) # 在当前所有可用数据上训练
+                lgbm.fit(X_val, y_val)
                 
                 importance_df = calculate_permutation_importance(
                     model=lgbm, X_val=X_val, y_val=y_val, metric_func=r2_score
                 )
                 
-                # 2. 获取带有复盘上下文的计划
+                # 2. Get plan with review context
                 plan = self.get_plan_from_llm(i, importance_report=importance_df)
             else:
-                # 常规迭代
+                # Regular iteration
                 plan = self.get_plan_from_llm(i)
 
-            # 2. 执行计划 (现在plan是一个列表)
-            temp_df, new_feature_name = execute_plan_func(self.best_df.copy(), plan)
+            # 2. Execute plan
+            temp_df, new_feature_name = execute_plan_func(self.best_df.copy(), plan, tlafs_params)
 
             if temp_df is None or new_feature_name is None:
-                print("⚠️ 执行计划失败或未生成新特征，跳过此迭代。")
-                # 对于失败的计划，我们也可以记录下来
+                print("⚠️ Plan execution failed or no new features generated. Skipping iteration.")
                 self.history.append({
                     "iteration": i, "plan": str(plan), "feature_name": "Execution Failed",
                     "performance": self.best_score, "adopted": False,
-                    "available_features": list(self.best_df.columns)
+                    "available_features": self.history[-1]['available_features'],
+                    "importances": self.history[-1].get('importances')
                 })
                 continue
             
-            # 3. 探测新特征集的性能
+            # 3. Probe new feature set performance
             features_to_probe = [c for c in temp_df.columns if c not in ['date', self.target_col]]
-            new_score, _ = probe_func(temp_df, self.target_col, features_to_probe)
+            new_score, _, importances_df = probe_func(temp_df, self.target_col, features_to_probe)
             
-            # 4. 决定是否采纳新特征
+            # 4. Decide whether to adopt new features
             improvement = new_score - self.best_score
-            adopted = improvement > self.acceptance_threshold
+            adopted = improvement >= self.acceptance_threshold
             
-            print(f"  - 新特征 '{new_feature_name}' 的探测R²: {new_score:.4f} (提升: {improvement:+.4f})")
+            print(f"  - New features '{new_feature_name}', probe R²: {new_score:.4f} (improvement: {improvement:+.4f})")
 
             if adopted:
-                print(f"  ✅ 已采纳: 性能提升超过阈值 {self.acceptance_threshold}")
+                print(f"  ✅ Adopted: Performance improvement meets threshold {self.acceptance_threshold}")
                 self.best_score = new_score
                 self.best_df = temp_df
                 self.best_plan.append(plan)
             else:
-                print(f"  ❌ 已拒绝: 性能提升不足。")
+                print(f"  ❌ Rejected: Insufficient performance improvement.")
 
-            # 5. 记录历史
+            # 5. Record history
             features_for_history = []
             if adopted:
                 features_for_history = [c for c in temp_df.columns if c not in ['date', self.target_col]]
             else:
-                # 如果未采纳，则可用特征集与上一步相同
                 features_for_history = self.history[-1]['available_features']
 
             self.history.append({
                 "iteration": i,
                 "plan": str(plan),
                 "feature_name": new_feature_name,
-                "performance": new_score, # 记录的是本次尝试的分数
+                "performance": new_score,
                 "adopted": adopted,
-                "available_features": features_for_history
+                "available_features": features_for_history,
+                "importances": importances_df if adopted else self.history[-1].get('importances')
             })
 
         print("\n" + "="*80)
-        print("🏆 T-LAFS特征搜索循环完成。")
-        print(f"🏆 找到的最佳R²分数: {self.best_score:.4f}")
-        print(f"📋 最终采纳的计划: {self.best_plan}")
+        print("🏆 T-LAFS feature search loop completed.")
+        print(f"🏆 Best R² score found: {self.best_score:.4f}")
+        print(f"📋 Final adopted plans: {self.best_plan}")
         print("="*80)
         
         final_df = self.best_df.copy()

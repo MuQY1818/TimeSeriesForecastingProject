@@ -23,7 +23,7 @@ def main():
     
     # ===== 配置变量 =====
     DATASET_TYPE = 'min_daily_temps'
-    N_ITERATIONS = 10
+    N_ITERATIONS = 5
     TARGET_COL = 'temp'
     
     print("="*80)
@@ -62,8 +62,8 @@ def main():
 
     # 将执行和探测函数传递给run方法
     best_df, best_feature_plan, best_score_during_search = tlafs_alg.run(
-        execute_plan_func=lambda df, plan: execute_plan(df, plan, tlafs_params),
-        probe_func=probe_feature_set
+        execute_plan_func=lambda df, plan, params: execute_plan(df, plan, params),
+        probe_func=lambda df, target, features: probe_feature_set(df, target, features)
     )
 
     # --- 3. 对找到的最佳特征集进行最终分析 ---
@@ -150,17 +150,78 @@ def main():
             permutation_importance_df.to_csv(perm_importance_path)
             print(f"\n✅ 排列重要性分析已保存至: {perm_importance_path}")
 
+            # --- 3.6. 基于重要性的最终特征剪枝 ---
+            print("\n========================================\n🔪 基于重要性的最终特征剪枝 🔪\n========================================")
+            PRUNING_THRESHOLD = 0.0
+            print(f"剪枝阈值 (Permutation Importance): <= {PRUNING_THRESHOLD}")
+            
+            # 获取低重要性特征
+            features_to_drop = permutation_importance_df[
+                permutation_importance_df['importance_mean'] <= PRUNING_THRESHOLD
+            ].index.tolist()
+            
+            if features_to_drop:
+                print(f"\n将删除以下低重要性特征:")
+                for feature in features_to_drop:
+                    print(f"  - {feature}")
+                
+                # 删除低重要性特征
+                df_pruned = best_df.copy()
+                df_pruned = df_pruned.drop(columns=features_to_drop)
+                
+                # 重新评估模型性能
+                print("\n重新评估剪枝后的模型性能...")
+                X_pruned = df_pruned.drop(columns=[TARGET_COL, 'date'])
+                y_pruned = df_pruned[TARGET_COL]
+                
+                # 使用LightGBM评估
+                lgb_model = lgb.LGBMRegressor(random_state=42)
+                lgb_model.fit(X_pruned, y_pruned)
+                y_pred_pruned = lgb_model.predict(X_pruned)
+                r2_pruned = r2_score(y_pruned, y_pred_pruned)
+                
+                print(f"\n剪枝后的性能:")
+                print(f"  - 特征数量: {len(X_pruned.columns)} (减少了 {len(features_to_drop)} 个特征)")
+                print(f"  - R² 分数: {r2_pruned:.4f}")
+                
+                # 如果性能没有显著下降，使用剪枝后的特征集
+                if r2_pruned >= best_final_metrics['r2'] - 0.01:  # 允许0.01的性能下降
+                    print("\n✅ 采用剪枝后的特征集")
+                    best_df = df_pruned
+                    best_final_metrics = final_metrics[max(final_metrics, key=lambda k: final_metrics[k]['r2'])]
+                    best_result_data = final_results[max(final_metrics, key=lambda k: final_metrics[k]['r2'])]
+                else:
+                    print("\n❌ 保持原始特征集")
+            else:
+                print("\n没有发现需要删除的低重要性特征")
 
             # --- 4. 保存所有结果 ---
+            # 从这里开始，使用最终决策的变量 (best_df, best_final_metrics, etc.)
+            best_final_metrics_after_pruning = best_final_metrics
+            best_result_data_after_pruning = best_result_data
+            
+            # 重新获取测试集索引，以防剪枝后的df长度变化
+            test_indices_after_pruning = best_df.index[-len(best_result_data['y_true']):]
+
+            visualize_final_predictions(
+                dates=best_df.loc[test_indices_after_pruning, 'date'],
+                y_true=best_result_data['y_true'],
+                y_pred=best_result_data['y_pred'],
+                best_model_name=best_final_model_name,
+                probe_name=probe_name_for_reporting,
+                best_model_metrics=best_final_metrics_after_pruning,
+                results_dir=results_dir
+            )
+
             summary_data = {
                 "probe_model": probe_name_for_reporting,
                 "best_score_during_search": best_score_during_search,
                 "best_feature_plan": best_feature_plan,
                 "final_features": [col for col in best_df.columns if col not in ['date', TARGET_COL]],
-                "final_validation_scores": final_metrics,
+                "final_validation_scores": best_final_metrics,
                 "best_final_model": {
                     "name": best_final_model_name,
-                    "metrics": best_final_metrics
+                    "metrics": best_final_metrics_after_pruning
                 },
                 "run_history": tlafs_alg.history
             }
