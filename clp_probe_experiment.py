@@ -27,6 +27,8 @@ import re
 from collections import defaultdict
 from probe_forecaster_utils import train_probe_forecaster, generate_probe_features, ProbeForecaster, PositionalEncoding, AgentAttentionProbe
 from mvse_tlafs_integration import generate_mvse_features_for_tlafs
+# --- NEW: Import MVSE training components ---
+from mvse_probe_integration import create_mvse_probe_features, train_mvse_probe_model, MVSEProbeForecaster
 
 warnings.filterwarnings('ignore')
 
@@ -328,6 +330,38 @@ def save_results_to_json(results_data, probe_name, results_dir):
         json.dump(results_data, f, indent=4, ensure_ascii=False, default=json_converter)
     print(f"\n✅ Results and configuration saved to {file_path}")
 
+def pretrain_mvse_probe(df, target_col='temp', hist_len=90, num_lags=14, epochs=100, patience=15):
+    """
+    NEW: Pre-trains the MVSEProbeForecaster model with early stopping.
+    """
+    print("\n🧠 Pre-training MVSE Probe Model for feature generation...")
+    try:
+        # 1. Create dataset
+        hist_sequences, lag_features, targets, _, target_scaler = create_mvse_probe_features(
+            df, target_col=target_col, hist_len=hist_len, num_lags=num_lags
+        )
+
+        if len(hist_sequences) == 0:
+            print("  - ⚠️ Not enough data to pre-train MVSE model. Skipping.")
+            return None, None
+
+        # 2. Train model with more epochs and early stopping
+        print(f"  - Training on {len(hist_sequences)} samples for up to {epochs} epochs...")
+        model, best_loss = train_mvse_probe_model(
+            hist_sequences, lag_features, targets,
+            epochs=epochs,
+            patience=patience, # Use early stopping
+            mask_rate=0.3,
+            batch_size=64
+        )
+
+        print(f"  - ✅ MVSE pre-training complete. Final validation loss: {best_loss:.6f}")
+        return model, target_scaler
+    except Exception as e:
+        import traceback
+        print(f"  - ❌ Failed to pre-train MVSE model: {e}\n{traceback.format_exc()}")
+        return None, None
+
 def evaluate_on_multiple_models(df: pd.DataFrame, target_col: str, probe_name: str):
     """
     Evaluates the final feature set on a variety of models.
@@ -472,9 +506,10 @@ class ExperienceReplayBuffer:
             for exp in bad_samples:
                 r2 = exp['state'].get('R2 Score (raw)', -1.0)
                 num_feats = exp['state'].get('Number of Features', 'N/A')
-                features = exp['state']['Available Features']
+                # --- OPTIMIZATION: Summarize feature list in examples ---
+                summarized_features = TLAFS_Algorithm.summarize_feature_list(exp['state']['Available Features'])
                 plan = exp['action']
-                prompt_str += f"- PAST_CONTEXT: R²={r2:.3f}, #Feats={num_feats}, Feats={features}. PLAN: {plan}. OUTCOME: REJECTED.\n"
+                prompt_str += f"- PAST_CONTEXT: R²={r2:.3f}, #Feats={num_feats}, Feats={summarized_features}. PLAN: {plan}. OUTCOME: REJECTED.\n"
             
         return prompt_str
 
@@ -581,6 +616,11 @@ class TLAFS_Algorithm:
         self.meta_scalers = {'x': scaler_x_meta, 'y': scaler_y_meta}
         TLAFS_Algorithm.meta_forecast_models = self.meta_forecast_models
         TLAFS_Algorithm.meta_scalers = self.meta_scalers
+
+        # --- NEW: Pre-train the MVSE model ---
+        self.mvse_probe_model, self.mvse_scaler = pretrain_mvse_probe(self.base_df, self.target_col)
+        TLAFS_Algorithm.mvse_probe_model = self.mvse_probe_model
+        TLAFS_Algorithm.mvse_scaler = self.mvse_scaler
 
     def pretrain_embedder(self, df_to_pretrain_on: pd.DataFrame, df_to_scale_on: pd.DataFrame, window_size: int, config: dict):
         """Pre-trains a masked autoencoder with validation and early stopping, and returns the trained ENCODER part."""
@@ -815,29 +855,29 @@ class TLAFS_Algorithm:
     def summarize_feature_list(features: list) -> list:
         """Compresses a list of feature names into a more compact, readable format for LLMs."""
         
-        # Group features by a pattern. Key is a descriptive name, value is a list of numbers.
-        # e.g., key='embed_*_embed90', value=[0, 1, 2, ...]
         groups = defaultdict(list)
         ungrouped = []
 
-        # Regex for embedding features like 'embed_12_LE_Yearly'
-        embed_pattern = re.compile(r"^(embed_)(\d+)(_.*)$")
-        # Regex for fourier features like 'fourier_sin_2_365'
-        fourier_pattern = re.compile(r"^(fourier_(?:sin|cos)_)(\d+)(_.*)$")
+        # --- OPTIMIZATION: Added more patterns for summarization ---
+        patterns = {
+            "embed": re.compile(r"^(embed_)(\d+)(_.*)$"),
+            "fourier": re.compile(r"^(fourier_(?:sin|cos)_)(\d+)(_.*)$"),
+            "probe": re.compile(r"^(probe_feat_)(\d+)$"),
+            "mvse": re.compile(r"^(mvse_feat_)(\d+)$"),
+        }
 
         for f in features:
-            embed_match = embed_pattern.match(f)
-            fourier_match = fourier_pattern.match(f)
-            
-            if embed_match:
-                prefix, number, suffix = embed_match.groups()
-                group_key = f"{prefix}*{suffix}"
-                groups[group_key].append(int(number))
-            elif fourier_match:
-                prefix, number, suffix = fourier_match.groups()
-                group_key = f"{prefix}*{suffix}"
-                groups[group_key].append(int(number))
-            else:
+            matched = False
+            for p_name, pattern in patterns.items():
+                match = pattern.match(f)
+                if match:
+                    # Create a group key. For patterns with 3 groups like embed, use group 1 and 3. For others, use group 1.
+                    key_part_3 = match.group(3) if len(match.groups()) > 2 else ''
+                    group_key = f"{match.group(1)}*{key_part_3}"
+                    groups[group_key].append(int(match.group(2)))
+                    matched = True
+                    break
+            if not matched:
                 ungrouped.append(f)
 
         # Reconstruct the list
@@ -1010,19 +1050,55 @@ class TLAFS_Algorithm:
                         print(f"  - ⚠️ Embedder for window {window} not available. Skipping.")
 
                 elif op == "create_interaction":
-                    features = step.get("features")
-                    if not features:
+                    features_in_plan = step.get("features")
+                    if not features_in_plan:
                         f1 = step.get("feature1", step.get("feature_a"))
                         f2 = step.get("feature2", step.get("feature_b"))
                         if f1 and f2:
-                            features = [f1, f2]
+                            features_in_plan = [f1, f2]
 
-                    if isinstance(features, list) and len(features)==2 and all(f in temp_df.columns for f in features):
+                    # --- FIX: Fuzzy matching to find actual feature names ---
+                    actual_features = []
+                    all_cols = temp_df.columns.tolist()
+                    
+                    if isinstance(features_in_plan, list):
+                        for f_plan in features_in_plan:
+                            # Correct common typos
+                            if "weekkofyear" in f_plan:
+                                f_plan = f_plan.replace("weekkofyear", "weekofyear")
+
+                            if f_plan in all_cols:
+                                actual_features.append(f_plan)
+                            else:
+                                # Try to find the closest match
+                                try:
+                                    # Use a library for fuzzy matching if available, otherwise simple check
+                                    # For now, let's assume a simple check for rolling features might work
+                                    # e.g., 'roll_mean7' in 'rolling_mean_7'
+                                    simplified_plan = f_plan.replace("_", "").replace("roll", "rolling")
+                                    
+                                    best_match = None
+                                    for col in all_cols:
+                                        simplified_col = col.replace("_", "")
+                                        if simplified_plan == simplified_col:
+                                            best_match = col
+                                            break # Found exact simplified match
+                                    
+                                    if best_match:
+                                        print(f"  - ⓘ Fuzzy matched '{f_plan}' to '{best_match}'")
+                                        actual_features.append(best_match)
+                                    else:
+                                        actual_features.append(f_plan) # Append original if no match found, will fail validation below
+
+                                except Exception:
+                                     actual_features.append(f_plan) # Fallback
+
+                    if isinstance(actual_features, list) and len(actual_features)==2 and all(f in temp_df.columns for f in actual_features):
                         id = step.get('id', 'new')
-                        new_col_name = f"{features[0]}_x_{features[1]}_{id}"
-                        temp_df[new_col_name] = temp_df[features[0]] * temp_df[features[1]]
+                        new_col_name = f"{actual_features[0]}_x_{actual_features[1]}_{id}"
+                        temp_df[new_col_name] = temp_df[actual_features[0]] * temp_df[actual_features[1]]
                     else:
-                        print(f"  - ⚠️ Skipping interaction for invalid/missing features: {features}")
+                        print(f"  - ⚠️ Skipping interaction for invalid/missing features: {features_in_plan}")
 
                 elif op == "create_forecast_feature":
                     model_name = step.get("model_name")
@@ -1080,9 +1156,14 @@ class TLAFS_Algorithm:
                         print("  - ⚠️ MVSE features already exist. Skipping operation.")
                         continue
                     
-                    print("  - Generating MVSE probe features...")
-                    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
-                    print("  - ✅ MVSE features generated.")
+                    # --- NEW: Use the pre-trained model ---
+                    model = TLAFS_Algorithm.mvse_probe_model
+                    scaler = TLAFS_Algorithm.mvse_scaler
+                    
+                    if model and scaler:
+                        temp_df = generate_mvse_features_for_tlafs(temp_df, target_col, model, scaler)
+                    else:
+                        print("  - ⚠️ MVSE pre-trained model not available. Skipping operation.")
 
                 elif op == "delete_feature":
                     feature_to_delete = step.get("feature")
@@ -1112,43 +1193,30 @@ class TLAFS_Algorithm:
         if (iteration_num / max_iterations) < 0.4:
             stage = "basic"
 
-        # --- Base Prompt ---
+        # --- OPTIMIZATION: More concise tool definitions ---
         base_prompt = f"""You are a Data Scientist RL agent. Your goal is to create a feature engineering plan to maximize the Fusion R^2 score.
 Your response MUST be a valid JSON list of operations: `[ {{"operation": "op_name", ...}}, ... ]`.
 The target column is '{self.target_col}'.
 """
-        # --- Tool Definitions based on Stage ---
         basic_tools = """
 # *** STAGE 1: BASIC FEATURE ENGINEERING ***
-# To replicate the success of strong manual feature engineering, you should consider applying these operations with multiple different windows/spans (e.g., 7, 14, 28).
+# GOAL: Create foundational features. Think about different windows/spans (e.g., 7, 14, 28).
 # AVAILABLE TOOLS:
-- {{"operation": "create_lag", "on": "feature_name", "days": int, "id": "..."}}
-- {{"operation": "create_diff", "on": "feature_name", "periods": int, "id": "..."}}
-- {{"operation": "create_rolling_mean", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_rolling_std", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_rolling_min", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_rolling_max", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_rolling_skew", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_rolling_kurt", "on": "feature_name", "window": int, "id": "..."}}
-- {{"operation": "create_ewm", "on": "feature_name", "span": int, "id": "..."}}
-- {{"operation": "create_fourier_features", "period": 365.25, "order": 4}}
-- {{"operation": "create_interaction", "features": ["feat1", "feat2"], "id": "..."}}
-- {{"operation": "delete_feature", "feature": "feature_name"}}
+- Lag/Diff: {{"operation": "create_lag", "on": "...", "days": ...}} OR {{"operation": "create_diff", ...}}
+- Rolling Stats: {{"operation": "create_rolling_{{mean|std|min|max}}", "on": "...", "window": ...}}
+- Exp. WM: {{"operation": "create_ewm", "on": "...", "span": ...}}
+- Fourier: {{"operation": "create_fourier_features", "period": 365.25, "order": 4}}
+- Interaction: {{"operation": "create_interaction", "features": ["feat1", "feat2"]}}
+- Delete: {{"operation": "delete_feature", "feature": "feature_name"}}
 """
 
         advanced_tools = """
-# *** STAGE 2: ADVANCED FEATURE ENGINEERING ***
-# Now you can use powerful learned embeddings and meta-forecasts. Combine them with the best basic features.
-# AVAILABLE TOOLS (includes all basic tools plus):
-# 1. Learned Embeddings (VERY POWERFUL)
-- {{"operation": "create_learned_embedding", "window": [90, 365, 730], "id": "UNIQUE_ID"}}
-
-# 2. Meta-Forecast Features
-- {{"operation": "create_forecast_feature", "model_name": ["SimpleNN_meta", "EnhancedNN_meta"], "id": "UNIQUE_ID"}}
-
-# 3. Traditional Attention Probe Features (POWERFUL but HIGH-DIMENSIONAL)
-# This generates 70+ features from a 365-day lookback window using an attention-based probe.
-- {{"operation": "create_probe_features"}}
+# *** STAGE 2: ADVANCED & LEARNED FEATURES ***
+# GOAL: Use powerful pre-trained models. Combine them with the best basic features.
+# AVAILABLE TOOLS (all basic tools are still available):
+- Learned Embeddings: {{"operation": "create_learned_embedding", "window": {{90|365|730}} }}
+- Meta-Forecasts: {{"operation": "create_forecast_feature", "model_name": "{{SimpleNN_meta|EnhancedNN_meta}}"}}
+- Attention Probe (High-Dim): {{"operation": "create_probe_features"}}
 """
         
         # --- NEW: Dynamically add MVSE tool if not already used ---
@@ -1156,25 +1224,16 @@ The target column is '{self.target_col}'.
         mvse_already_exists = any(col.startswith('mvse_feat_') for col in self.best_df.columns)
         
         if not mvse_already_exists:
-            advanced_tools += """
-# 4. MVSE Probe Features (NEWEST & HIGHLY EFFICIENT) ⭐ RECOMMENDED ⭐
-# Multi-View Sequential Embedding: Uses 3 pooling strategies (GAP, GMP, MaskedGAP) to extract robust features.
-# Generates only 24 high-quality features (much fewer than traditional probe_features).
-# Excellent for capturing both trends and anomalies with strong robustness.
-# ADVANTAGE: Lower dimensionality, better generalization, faster training.
-- {{"operation": "create_mvse_features"}}
+            advanced_tools += """- MVSE Probe (Efficient): {{"operation": "create_mvse_features"}} # RECOMMENDED
 """
 
         # --- Rules ---
         rules = """
 *** RULES ***
-- IDs must be unique. Do not reuse IDs from "Available Features". `create_probe_features` automatically creates features named 'probe_feat_0' to 'probe_feat_511'. Do not try to assign an ID to it.
-- Propose short plans (1-3 steps).
-- For parameters shown with a list of options (e.g., "window": [90, 365]), you MUST CHOOSE ONLY ONE value (e.g., "window": 365). DO NOT return a list for the value.
-- `create_learned_embedding` is very powerful. Try interacting it with other features using `create_interaction`.
-- `create_mvse_features` is HIGHLY RECOMMENDED over `create_probe_features` due to better efficiency and lower overfitting risk.
-- `create_probe_features` is powerful but high-dimensional. Use it when you need maximum feature richness.
-- Do not try to compress `learned_embedding` or `probe_features` features; use them directly.
+- Be creative. Propose short plans (1-2 steps).
+- IDs ("id": "...") are optional and auto-generated if omitted.
+- For params like "window": {{90|365}}, CHOOSE ONE value (e.g., "window": 365).
+- `create_learned_embedding` & `create_mvse_features` are very powerful. Try creating interactions with them.
 """
 
         system_prompt = base_prompt
@@ -1243,8 +1302,9 @@ The target column is '{self.target_col}'.
         importances = probe_results.get("importances")
         if importances is not None and not importances.empty:
             sorted_importances = importances.sort_values(ascending=False)
-            context["Top Features (High Importance)"] = sorted_importances.head(5).to_dict()
-            context["Bottom Features (Low Importance)"] = sorted_importances.tail(5).to_dict()
+            # --- OPTIMIZATION: Reduce number of examples ---
+            context["Top Features (High Importance)"] = sorted_importances.head(3).to_dict()
+            context["Bottom Features (Low Importance)"] = sorted_importances.tail(3).to_dict()
             
         return context
 
@@ -1261,7 +1321,8 @@ The target column is '{self.target_col}'.
                 # Filter out zero-importance features for brevity
                 filtered_dict = {k: v for k, v in value.items() if v > 0} if "Importance" in key else value
                 for k, v in filtered_dict.items():
-                    prompt += f"  - {k}: {v:.6f}\n"
+                    # --- OPTIMIZATION: Reduce float precision ---
+                    prompt += f"  - {k}: {v:.4f}\n"
             else:
                 prompt += f"- {key}: {value}\n"
         

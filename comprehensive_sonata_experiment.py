@@ -28,10 +28,10 @@ from sklearn.svm import SVR
 from sklearn.linear_model import Lasso
 
 # --- 从现有脚本中导入核心逻辑 ---
-# 我们假设 specialist_tlafs_experiment.py 中的必要类和函数是可导入的
+# 我们假设 clp_probe_experiment.py 中的必要类和函数是可导入的
 # 在实际应用中，最好将这些共享的类和函数重构到一个单独的 utils.py 文件中
 # FIX: 导入整个模块以正确处理全局变量的作用域问题
-import specialist_tlafs_experiment as tlafs_exp
+import clp_probe_experiment as tlafs_exp
 
 warnings.filterwarnings('ignore')
 
@@ -249,8 +249,8 @@ class Sonata_TLAFS_Algorithm(tlafs_exp.TLAFS_Algorithm):
         importances = probe_results.get("importances")
         if importances is not None and not importances.empty:
             sorted_importances = importances.sort_values(ascending=False)
-            top_n = 5
-            bottom_n = 5
+            top_n = 3
+            bottom_n = 3
             context["Top Features (High Importance)"] = sorted_importances.head(top_n).to_dict()
             context["Bottom Features (Low Importance)"] = sorted_importances.tail(bottom_n).to_dict()
         
@@ -272,7 +272,7 @@ class Sonata_TLAFS_Algorithm(tlafs_exp.TLAFS_Algorithm):
                 # 过滤掉值为0的重要性特征，使其更简洁
                 filtered_dict = {k: v for k, v in value.items() if v > 0} if "Importance" in key else value
                 for k, v in filtered_dict.items():
-                    prompt += f"  - {k}: {v:.6f}\n"
+                    prompt += f"  - {k}: {v:.4f}\n"
             else:
                 prompt += f"- {key}: {value}\n"
         

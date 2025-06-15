@@ -139,7 +139,7 @@ def create_mvse_probe_features(df, target_col='temp', hist_len=90, num_lags=14):
 
 def train_mvse_probe_model(hist_sequences, lag_features, targets, 
                           input_dim=3, epochs=100, batch_size=32, 
-                          learning_rate=0.001, mask_rate=0.3):
+                          learning_rate=0.001, mask_rate=0.3, patience=15):
     """
     训练 MVSEProbeForecaster 模型
     """
@@ -182,7 +182,6 @@ def train_mvse_probe_model(hist_sequences, lag_features, targets,
     
     # 训练循环
     best_val_loss = float('inf')
-    patience = 15
     patience_counter = 0
     
     for epoch in range(epochs):

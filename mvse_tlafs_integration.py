@@ -21,33 +21,28 @@ from mvse_probe_integration import MVSEProbeForecaster, create_mvse_probe_featur
 warnings.filterwarnings('ignore')
 
 
-def generate_mvse_features_for_tlafs(df, target_col='temp', hist_len=90, num_lags=14):
+def generate_mvse_features_for_tlafs(df, target_col, model, target_scaler, hist_len=90, num_lags=14):
     """
-    为 T-LAFS 框架生成 MVSE 探针特征
+    为 T-LAFS 框架生成 MVSE 探针特征（使用预训练模型）
     
     这个函数专门为 T-LAFS 的 execute_plan 方法设计
     """
-    print("  - 🔮 生成 MVSE 探针特征...")
+    print("  - 🔮 使用预训练的 MVSE 模型生成探针特征...")
     
     try:
-        # 创建特征
-        hist_sequences, lag_features, targets, valid_indices, target_scaler = create_mvse_probe_features(
-            df, target_col=target_col, hist_len=hist_len, num_lags=num_lags
+        # 创建用于推理的输入数据
+        hist_sequences, lag_features, _, valid_indices, _ = create_mvse_probe_features(
+            df, target_col=target_col, hist_len=hist_len, num_lags=num_lags, scaler=target_scaler
         )
         
         if len(hist_sequences) == 0:
             print("  - ⚠️ 数据不足，无法生成 MVSE 特征")
             return df
         
-        # 训练模型（使用较少的轮次以提高速度）
-        model, best_loss = train_mvse_probe_model(
-            hist_sequences, lag_features, targets,
-            epochs=30, mask_rate=0.3, batch_size=64
-        )
-        
-        # 生成特征
+        # 使用预训练模型生成特征
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.eval()
+        model.to(device)
         
         with torch.no_grad():
             # 获取 MVSE 编码特征
@@ -99,13 +94,14 @@ def generate_mvse_features_for_tlafs(df, target_col='temp', hist_len=90, num_lag
             columns=feature_names
         )
         
-        print(f"  - ✅ MVSE 特征生成完成: {len(feature_names)} 个特征, 训练损失: {best_loss:.6f}")
+        print(f"  - ✅ MVSE 特征生成完成: {len(feature_names)} 个特征")
         
         # 使用 shift(1) 避免数据泄露
         return df.join(features_df.shift(1))
         
     except Exception as e:
-        print(f"  - ❌ MVSE 特征生成失败: {e}")
+        import traceback
+        print(f"  - ❌ MVSE 特征生成失败: {e}\n{traceback.format_exc()}")
         return df
 
 
@@ -116,7 +112,7 @@ def add_mvse_to_execute_plan():
     mvse_operation_code = '''
                 elif op == "create_mvse_features":
                     print("  - Generating MVSE probe features...")
-                    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
+                    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col, model, target_scaler)
                     print("  - ✅ MVSE features generated.")
     '''
     return mvse_operation_code
@@ -180,7 +176,7 @@ def create_enhanced_tlafs_with_mvse():
                     try:
                         if op == "create_mvse_features":
                             print("  - Generating MVSE probe features...")
-                            temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
+                            temp_df = generate_mvse_features_for_tlafs(temp_df, target_col, model, target_scaler)
                             print("  - ✅ MVSE features generated.")
                         else:
                             # 对于其他操作，调用父类的方法
@@ -329,7 +325,7 @@ def test_mvse_integration_in_tlafs():
     
     # 测试 MVSE 特征生成
     print("\n🔧 测试 MVSE 特征生成...")
-    df_with_mvse = generate_mvse_features_for_tlafs(df, target_col='temp')
+    df_with_mvse = generate_mvse_features_for_tlafs(df, target_col='temp', model=None, target_scaler=None)
     
     # 检查结果
     mvse_cols = [col for col in df_with_mvse.columns if 'mvse_' in col]
@@ -380,7 +376,7 @@ from mvse_probe_integration import generate_mvse_probe_features_for_tlafs
 ```python
 elif op == "create_mvse_features":
     print("  - Generating MVSE probe features...")
-    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col)
+    temp_df = generate_mvse_features_for_tlafs(temp_df, target_col, model, target_scaler)
     print("  - ✅ MVSE features generated.")
 ```
 
