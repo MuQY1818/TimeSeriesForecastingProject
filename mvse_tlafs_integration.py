@@ -18,6 +18,10 @@ import sys
 from mvse_embedding import MVSEEmbedding
 from mvse_probe_integration import MVSEProbeForecaster, create_mvse_probe_features, train_mvse_probe_model
 
+# 在原有的 tlafs_core.py 基础上添加 MVSE 探针功能
+from tlafs_core import TLAFS_Algorithm as OriginalTLAFS
+from tlafs_core import gemini_model
+
 warnings.filterwarnings('ignore')
 
 
@@ -299,7 +303,7 @@ The target column is '{self.target_col}'.
         
     except ImportError as e:
         print(f"❌ 无法导入原始 TLAFS_Algorithm: {e}")
-        print("请确保 clp_probe_experiment.py 文件存在且可导入")
+        print("请确保 tlafs_core.py 文件存在且可导入")
         return None
 
 

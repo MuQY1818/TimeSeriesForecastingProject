@@ -2,7 +2,7 @@
 
 This project introduces **T-LAFS (Time-series Language-augmented Feature Search)**, an advanced, AI-driven framework for automated time-series feature engineering and forecasting.
 
-The core of this project is the `clp_probe_experiment.py` script, a highly configurable entry point that demonstrates the full capabilities of the T-LAFS framework on various time-series datasets.
+The core of this project is the `tlafs_core.py` script, a highly configurable entry point that demonstrates the full capabilities of the T-LAFS framework on various time-series datasets.
 
 ## Core Idea: Probe-and-Validate Strategy
 
@@ -53,7 +53,7 @@ This strategy ensures that the feature engineering is not overfitted to a single
       If you don't set these, the script will fall back to a pre-defined, non-AI plan.
 
 3.  **Configure the Experiment**:
-    - Open the `clp_probe_experiment.py` file.
+    - Open the `tlafs_core.py` file.
     - Inside the `main()` function, you can easily configure the experiment:
       - **`DATASET_TYPE`**: Choose the dataset to use.
         - `'min_daily_temps'`: The original daily minimum temperatures dataset.
@@ -74,7 +74,7 @@ This strategy ensures that the feature engineering is not overfitted to a single
 
 4.  **Run the script**:
     ```bash
-    python clp_probe_experiment.py
+    python tlafs_core.py
     ```
 
 The script will execute the full Probe-and-Validate pipeline using your configuration. Final results, including plots and a JSON summary, will be saved to the `plots/` and `results/` directories respectively.
